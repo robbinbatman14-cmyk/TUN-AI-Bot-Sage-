@@ -1,0 +1,25 @@
+{
+  "name": "unai",
+  "version": "1.0.0",
+  "description": "Union of Nations AI Assistant - Discord bot for the TUN alliance in Politics & War",
+  "main": "src/index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/index.js",
+    "deploy-commands": "node src/deploy-commands.js",
+    "list-gemini-models": "node src/list-gemini-models.js"
+  },
+  "dependencies": {
+    "@google/genai": "^2.13.0",
+    "better-sqlite3": "^11.3.0",
+    "discord.js": "^14.16.3",
+    "dotenv": "^16.4.5",
+    "mammoth": "^1.8.0",
+    "openai": "^4.67.3",
+    "pdf-parse": "^1.1.1",
+    "@anthropic-ai/sdk": "^0.27.3"
+  },
+  "engines": {
+    "node": "20.x || 22.x"
+  }
+}
