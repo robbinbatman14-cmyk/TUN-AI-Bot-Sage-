@@ -11,9 +11,10 @@ const faqCommand = require('./commands/faqCommand');
 const reviewCommand = require('./commands/reviewCommand');
 const profileCommand = require('./commands/profileCommand');
 const backupCommand = require('./commands/backupCommand');
+const sourcesCommand = require('./commands/sourcesCommand');
 const helpCommand = require('./commands/helpCommand');
 
-const commands = [aiCommand, knowledgeCommand, faqCommand, reviewCommand, profileCommand, backupCommand, helpCommand].map(c => c.data.toJSON());
+const commands = [aiCommand, knowledgeCommand, faqCommand, reviewCommand, profileCommand, backupCommand, sourcesCommand, helpCommand].map(c => c.data.toJSON());
 
 const rest = new REST().setToken(process.env.DISCORD_TOKEN);
 

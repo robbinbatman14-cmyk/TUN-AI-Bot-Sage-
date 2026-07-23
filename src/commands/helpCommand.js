@@ -28,6 +28,7 @@ const CATEGORY_ORDER = [
   'General',
   'Configuration & Administration',
   'Knowledge Base',
+  'Knowledge Sources',
   'FAQ',
   'Configuration Profiles',
   'Backup & Restore',

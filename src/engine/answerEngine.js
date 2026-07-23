@@ -67,7 +67,7 @@ async function answer(question, level, contextText = '') {
     }
   ];
 
-  const raw = await ai.chat(messages, { json: true });
+  const raw = await ai.chat(messages, { json: true, purpose: 'answer' });
 
   let parsed;
   try {

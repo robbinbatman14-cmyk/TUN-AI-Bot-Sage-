@@ -48,7 +48,42 @@ async function reindexDocument(id) {
   return knowledgeStore.indexDocument(id);
 }
 
+/**
+ * Replaces a document's content with new text, archiving the previous
+ * content into document_versions and bumping the minor version number
+ * (Section 37 - Knowledge Versioning). If the document is currently
+ * approved, it's automatically re-indexed so search reflects the update
+ * immediately; if it's pending/rejected/archived, content is updated but
+ * left as-is until separately approved.
+ */
+async function updateDocumentContent(id, newContent) {
+  const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(id);
+  if (!doc) throw new Error(`No document with ID ${id}.`);
+
+  db.prepare('INSERT INTO document_versions (document_id, version, content) VALUES (?, ?, ?)')
+    .run(id, doc.version, doc.content);
+
+  const [major, minor] = (doc.version || '1.0').split('.').map(n => parseInt(n, 10) || 0);
+  const newVersion = `${major}.${minor + 1}`;
+
+  db.prepare('UPDATE documents SET content = ?, version = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?')
+    .run(newContent, newVersion, id);
+
+  let chunkCount = 0;
+  const reindexed = doc.status === 'approved';
+  if (reindexed) {
+    chunkCount = await knowledgeStore.indexDocument(id);
+  }
+
+  return { previousVersion: doc.version, newVersion, reindexed, chunkCount };
+}
+
+function getVersionHistory(id) {
+  return db.prepare('SELECT version, archived_at FROM document_versions WHERE document_id = ? ORDER BY id DESC').all(id);
+}
+
 module.exports = {
   addDocument, approveDocument, rejectDocument, archiveDocument,
-  deleteDocument, listDocuments, getDocument, reindexDocument
+  deleteDocument, listDocuments, getDocument, reindexDocument,
+  updateDocumentContent, getVersionHistory
 };

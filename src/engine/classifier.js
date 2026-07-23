@@ -26,7 +26,7 @@ Respond ONLY with JSON in this exact shape:
     { role: 'user', content: `Recent context (may be empty):\n${contextText}\n\nMessage to classify:\n${messageText}` }
   ];
 
-  const raw = await ai.chat(messages, { json: true });
+  const raw = await ai.chat(messages, { json: true, purpose: 'classify' });
   try {
     return JSON.parse(raw);
   } catch {

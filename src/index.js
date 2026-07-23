@@ -6,13 +6,16 @@ const { Client, GatewayIntentBits, Partials, Collection, Events } = require('dis
 
 require('./config/db'); // ensures schema exists before anything else runs
 
+const configManager = require('./config/configManager');
 const decisionEngine = require('./engine/decisionEngine');
+const sourceManager = require('./knowledge/sourceManager');
 const aiCommand = require('./commands/aiCommand');
 const knowledgeCommand = require('./commands/knowledgeCommand');
 const faqCommand = require('./commands/faqCommand');
 const reviewCommand = require('./commands/reviewCommand');
 const profileCommand = require('./commands/profileCommand');
 const backupCommand = require('./commands/backupCommand');
+const sourcesCommand = require('./commands/sourcesCommand');
 const helpCommand = require('./commands/helpCommand');
 
 const client = new Client({
@@ -26,13 +29,34 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-for (const cmd of [aiCommand, knowledgeCommand, faqCommand, reviewCommand, profileCommand, backupCommand, helpCommand]) {
+for (const cmd of [aiCommand, knowledgeCommand, faqCommand, reviewCommand, profileCommand, backupCommand, sourcesCommand, helpCommand]) {
   client.commands.set(cmd.data.name, cmd);
 }
 
 client.once(Events.ClientReady, c => {
   console.log(`[UNAI] Logged in as ${c.user.tag}`);
   console.log(`[UNAI] Serving ${c.guilds.cache.size} guild(s).`);
+
+  // Periodic knowledge source sync (Section 39 - Automatic Knowledge
+  // Updates). Runs once shortly after startup, then on a fixed interval.
+  // A lockdown check happens inside each run rather than skipping the
+  // scheduler entirely, so sync resumes automatically the moment lockdown
+  // is lifted without needing a restart.
+  const intervalMinutes = configManager.getNumber('google_doc_sync_interval_minutes') || 60;
+  const runSync = async () => {
+    if (configManager.getBool('lockdown_enabled')) return;
+    try {
+      const results = await sourceManager.syncAllDueSources();
+      const changed = results.filter(r => r.synced);
+      if (changed.length > 0) {
+        console.log(`[UNAI] Knowledge source sync: ${changed.length} source(s) updated.`);
+      }
+    } catch (err) {
+      console.error('[UNAI] Knowledge source sync failed:', err.message);
+    }
+  };
+  setTimeout(runSync, 2 * 60 * 1000); // first run 2 minutes after startup
+  setInterval(runSync, intervalMinutes * 60 * 1000);
 });
 
 client.on(Events.InteractionCreate, async interaction => {
@@ -81,7 +105,6 @@ client.on(Events.MessageCreate, async message => {
     await message.reply({ content: result.payload.text.slice(0, 1900) });
 
     if (result.payload.escalate) {
-      const configManager = require('./config/configManager');
       const escalationChannelId = configManager.get('escalation_channel_id');
       if (escalationChannelId) {
         const channel = await client.channels.fetch(escalationChannelId).catch(() => null);

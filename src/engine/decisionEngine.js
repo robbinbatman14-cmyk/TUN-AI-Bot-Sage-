@@ -47,6 +47,13 @@ async function process(message, { wasMentioned, guildMember }) {
     return { action: 'silent', reason: 'ai_disabled' };
   }
 
+  // Stage: emergency lockdown (Section 99) — a stricter, more visible
+  // shutdown than ai_enabled=false, intended for active-incident use;
+  // see /ai lockdown.
+  if (configManager.getBool('lockdown_enabled')) {
+    return { action: 'silent', reason: 'lockdown_active' };
+  }
+
   // Stage: security guard (Sections 88-89, 94) — cheap, deterministic,
   // runs before any AI call so an injection attempt never even reaches
   // the model, and a spam burst never costs API quota.
@@ -135,7 +142,8 @@ async function process(message, { wasMentioned, guildMember }) {
       confidence: result.confidence,
       documentsUsed: result.documentsConsulted,
       escalated: false,
-      responseTimeMs: Date.now() - startTime
+      responseTimeMs: Date.now() - startTime,
+      topic: classification.topic
     });
     return { action: 'silent', reason: 'model_declined' };
   }
@@ -154,7 +162,8 @@ async function process(message, { wasMentioned, guildMember }) {
       confidence: result.confidence,
       documentsUsed: result.documentsConsulted,
       escalated: true,
-      responseTimeMs: Date.now() - startTime
+      responseTimeMs: Date.now() - startTime,
+      topic: classification.topic
     });
     cooldown.recordResponse(message.author.id, message.channel.id);
     return { action: 'respond', payload };
@@ -178,7 +187,8 @@ async function process(message, { wasMentioned, guildMember }) {
     confidence: result.confidence,
     documentsUsed: result.documentsConsulted,
     escalated: !!result.should_escalate,
-    responseTimeMs: Date.now() - startTime
+    responseTimeMs: Date.now() - startTime,
+    topic: classification.topic
   });
   cooldown.recordResponse(message.author.id, message.channel.id);
 

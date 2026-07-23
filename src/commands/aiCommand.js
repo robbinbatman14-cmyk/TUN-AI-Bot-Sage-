@@ -5,6 +5,7 @@ const { SlashCommandBuilder, PermissionFlagsBits, ChannelType } = require('disco
 const configManager = require('../config/configManager');
 const permissionEngine = require('../permissions/permissionEngine');
 const logger = require('../logging/logger');
+const usageTracker = require('../logging/usageTracker');
 const ai = require('../ai/providerManager');
 
 function requireAdmin(interaction) {
@@ -66,6 +67,11 @@ const data = new SlashCommandBuilder()
     .addSubcommand(sc => sc.setName('list').setDescription('List role-to-permission mappings')))
   .addSubcommand(sc => sc.setName('analytics').setDescription('Show operational statistics'))
   .addSubcommand(sc => sc.setName('diagnose').setDescription('Show system diagnostics'))
+  .addSubcommand(sc => sc.setName('costs').setDescription('Show estimated API usage and cost over a recent period')
+    .addIntegerOption(o => o.setName('hours').setDescription('Look-back window in hours (default 24)').setRequired(false)))
+  .addSubcommand(sc => sc.setName('lockdown')
+    .setDescription('Emergency lockdown: stop all automatic responses immediately, more visible than /ai disable')
+    .addBooleanOption(o => o.setName('value').setDescription('Enable lockdown?').setRequired(true)))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
 async function execute(interaction) {
@@ -134,6 +140,7 @@ async function execute(interaction) {
     case 'status': {
       const c = [
         `**Enabled:** ${configManager.getBool('ai_enabled')}`,
+        `**Lockdown:** ${configManager.getBool('lockdown_enabled') ? '🔒 ACTIVE' : 'inactive'}`,
         `**Mode:** ${configManager.get('trigger_mode')}`,
         `**Confidence threshold:** ${configManager.get('confidence_threshold')}%`,
         `**Personality:** ${configManager.get('personality')}`,
@@ -163,13 +170,19 @@ async function execute(interaction) {
       return interaction.reply(`Escalation channel set to ${interaction.options.getChannel('channel')}.`);
     case 'analytics': {
       const stats = logger.analytics();
-      const text = [
-        `**Total responses logged:** ${stats.totalResponses}`,
+      const lines = [
+        `**Total responses logged:** ${stats.totalResponses} (${stats.answered} answered, ${stats.silent} stayed silent)`,
         `**Escalations:** ${stats.escalations}`,
         `**Average confidence:** ${stats.avgConfidence ?? 'n/a'}%`,
         `**Average response time:** ${stats.avgResponseTimeMs ?? 'n/a'} ms`
-      ].join('\n');
-      return interaction.reply({ content: text, ephemeral: true });
+      ];
+      if (stats.topTopics.length) {
+        lines.push(`**Most common topics:** ${stats.topTopics.map(t => `${t.topic} (${t.c})`).join(', ')}`);
+      }
+      if (stats.topDocuments.length) {
+        lines.push(`**Most referenced documents:** ${stats.topDocuments.map(d => `${d.title} (${d.count})`).join(', ')}`);
+      }
+      return interaction.reply({ content: lines.join('\n'), ephemeral: true });
     }
     case 'diagnose': {
       const text = [
@@ -179,6 +192,25 @@ async function execute(interaction) {
         `**Memory (RSS):** ${Math.round(process.memoryUsage().rss / 1024 / 1024)} MB`
       ].join('\n');
       return interaction.reply({ content: text, ephemeral: true });
+    }
+    case 'costs': {
+      const hours = interaction.options.getInteger('hours') || 24;
+      const usage = usageTracker.usageSummary({ sinceHours: hours });
+      const lines = [`**API usage over the last ${hours}h:**`, `**Total calls:** ${usage.totalCalls}`];
+      for (const [provider, data] of Object.entries(usage.byProvider)) {
+        lines.push(`— ${provider}: ${data.calls} calls, ${data.promptTokens.toLocaleString()} prompt + ${data.outputTokens.toLocaleString()} output tokens`);
+      }
+      lines.push(`**Estimated cost:** ~$${usage.estimatedCostUSD.toFixed(4)} USD`);
+      lines.push(`*Estimate only, based on rough published rates — free-tier Gemini use is actually $0 unless billing is enabled. Check your provider's dashboard for exact billing.*`);
+      return interaction.reply({ content: lines.join('\n'), ephemeral: true });
+    }
+    case 'lockdown': {
+      const enable = interaction.options.getBoolean('value');
+      configManager.set('lockdown_enabled', enable);
+      if (enable) {
+        return interaction.reply('🔒 **Emergency lockdown ACTIVE.** All automatic responses have stopped immediately. Knowledge base changes are still possible for admins, but the AI will not respond to anyone until lockdown is disabled with `/ai lockdown value:false`.');
+      }
+      return interaction.reply('🔓 Lockdown lifted. UNAI will resume responding according to its normal configuration (still subject to `/ai enable`/`/ai disable`).');
     }
   }
 }

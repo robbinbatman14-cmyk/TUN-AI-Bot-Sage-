@@ -32,7 +32,7 @@ Make sure the bot's invite included the `applications.commands` and `bot` scopes
 **Default for Version 1.0 is Google Gemini**, so you can develop and test on its free tier with no credit card:
 
 1. Go to https://aistudio.google.com/apikey → "Create API key". That's it — no billing setup needed for the free tier.
-2. Free tier note: `gemini-2.5-flash-lite` (the default model here) has the most generous free-tier rate limits of the current Gemini lineup, but they're still modest — expect roughly 15 requests/minute and ~1,000/day, shared across both the classification call and the answer-generation call UNAI makes per question. Fine for testing and a small/medium alliance; if you outgrow it, either enable billing on the same Google AI Studio project (pay-as-you-go, no code change) or switch providers.
+2. Free tier note: `gemini-flash-lite-latest` (the default model here) has kept the most generous free-tier rate limits in the current Gemini lineup, but they're still finite — roughly 15-30 requests/minute and ~1,000-1,500/day, shared across both the classification call and the answer-generation call UNAI makes per question. Fine for testing and a small/medium alliance; if you outgrow it, either enable billing on the same Google AI Studio project (pay-as-you-go, no code change) or switch providers. Avoid switching `GEMINI_MODEL` to the plain `gemini-flash-latest` alias — at time of writing it resolves to a brand-new preview model with a much tighter free quota (as low as 20/day), which is enough to break a live bot within minutes.
 
 **If/when you want to switch later** (e.g. to OpenAI for higher throughput, or Anthropic):
 - OpenAI: https://platform.openai.com/api-keys → "Create new secret key" (requires billing enabled, even light usage costs a few cents).
@@ -125,7 +125,7 @@ Your `.env` file (with your real secrets) should **never** be uploaded to GitHub
    - `DISCORD_GUILD_ID` (optional — remove this once you're happy, so commands register globally instead of just your server)
    - `AI_PROVIDER` = `gemini`
    - `GEMINI_API_KEY`
-   - `GEMINI_MODEL` = `gemini-2.5-flash-lite`
+   - `GEMINI_MODEL` = `gemini-flash-lite-latest`
    - `GEMINI_EMBEDDING_MODEL` = `gemini-embedding-001`
    - `DATABASE_PATH` = `/app/data/unai.db`
    - Railway runs whatever Node version its Nixpacks builder defaults to (currently a recent LTS), which should already be compatible — you don't need to fight the Node-version issue there like you might locally.
@@ -157,9 +157,15 @@ Your bot is now running 24/7. Railway restarts it automatically if it crashes (`
 | `/ai channels add/remove/list` | Control which channels UNAI watches |
 | `/ai topics enable/disable/list` | Control which subjects UNAI will engage with |
 | `/ai permissions set/remove/list` | Map Discord roles to access levels |
-| `/ai analytics` | Usage stats |
+| `/ai analytics` | Usage stats, now including top topics and most-referenced documents |
+| `/ai costs value:hours` | Estimated API usage and cost over a recent window |
 | `/ai diagnose` | System health |
+| `/ai lockdown value:true\|false` | Emergency lockdown — stronger and more visible than `/ai disable`; also pauses knowledge base changes |
 | `/knowledge upload/approve/reject/archive/delete/reindex/list` | Manage documents (`.txt`, `.md`, `.pdf`, `.docx`) |
+| `/knowledge update id:X file:...` | Replace a document's content, keeping full version history |
+| `/knowledge versions id:X` | View a document's version history |
+| `/sources add-google-doc link:... title:... category:...` | Link a Google Doc as a live-syncing knowledge source |
+| `/sources list` / `sync` / `enable` / `disable` / `remove` | Manage knowledge sources |
 | `/faq add/list/delete` | Manage quick FAQ answers |
 | `/profile save/load/list/delete` | Save/apply named configuration snapshots (e.g. `war-mode`, `peace-mode`) |
 | `/backup export` / `/backup import` | Download or restore a full backup (config, channels, topics, permissions, FAQ, documents) |
@@ -178,6 +184,33 @@ Beyond the system prompt already instructing the model to resist override attemp
 
 ---
 
+### Emergency lockdown vs. disable
+
+`/ai disable` is a normal off switch. `/ai lockdown value:true` (Section 99) is for active incidents: it stops all automatic responses immediately *and* pauses knowledge base changes (upload/approve/reindex/update all get blocked with a clear message) until you explicitly lift it with `/ai lockdown value:false`. Use it if something's actively wrong and you want to freeze the bot's state entirely while you sort it out.
+
+### Document versioning
+
+`/knowledge update id:5 file:[new version]` replaces a document's content without losing history — the old content is archived automatically and the version number bumps (e.g. 1.0 → 1.1). `/knowledge versions id:5` shows the full history. If the document was already approved, the update is re-indexed immediately so search reflects the change.
+
+### Cost monitoring
+
+`/ai costs` shows real token counts and a rough cost estimate pulled from actual API responses (not a guess) over a configurable look-back window, e.g. `/ai costs hours:168` for the last week. The dollar figure is clearly an estimate based on published rates, not your actual bill — Gemini's free tier is genuinely $0 unless you've enabled billing, regardless of what the estimate shows.
+
+### Google Docs knowledge sync
+
+Instead of exporting and re-uploading a document every time it changes, you can link a Google Doc directly. Edit the Doc, and UNAI picks up the change automatically — no re-uploading, ever.
+
+**Setup, per document:**
+1. In Google Docs, click **Share** → under "General access", change it to **"Anyone with the link"** → **Viewer**.
+2. Copy the document's link.
+3. `/sources add-google-doc link:[paste] title:"Member Guide" category:member_guide`
+4. It comes in as a **pending** document, same as any upload — review it, then `/knowledge approve id:X` once.
+5. From then on, UNAI checks the Doc every hour by default (configurable — see below) and automatically re-indexes it if you've edited it. `/sources sync id:X` forces an immediate check instead of waiting.
+
+**Important security tradeoff, please read before using this for anything sensitive:** this works without any Google Cloud setup because it uses the Doc's public "anyone with the link" export — which means **anyone who has that Google Doc URL can read it directly**, completely independent of whatever Discord visibility tier (`members_only`, `government`, etc.) you set for it inside UNAI. That visibility setting only controls who the *AI* will surface the content to in Discord — it does nothing to protect the underlying Google Doc itself. This is a fine tradeoff for a Member Guide or public FAQ; it's the wrong tool for anything genuinely confidential (say, real financial records or classified military planning) — keep those as manual `.txt`/`.pdf`/`.docx` uploads instead, which never leave your control.
+
+**Sync interval:** defaults to every 60 minutes. Change it by editing the `google_doc_sync_interval_minutes` config value directly in the database, or ask me to add a slash command for it if you'll want to change this often — I kept it out of the command surface for now to avoid it feeling like a dial you need to touch.
+
 ## How it actually decides to respond (for your own understanding)
 
 1. Ignores bots, webhooks, DMs.
@@ -195,8 +228,11 @@ This matches the spec's core principle: **"Should I respond?" is always asked be
 
 ## What's genuinely NOT built yet (by design, per your call on scope)
 
+- **Live Politics & War API integration** (alliance/nation lookups, "who is @X" Discord-to-nation linking) — this is next up, by your priority call. Unlike the Banking/Audit/Legislation bots, the P&W API is real and public, so this is fully buildable now.
 - Live integrations with Banking / Audit / Legislation / Activity / Election bots (Sections 47–54) — nothing exists yet to connect to. When one of those bots has a database or API, a new file goes in `src/integrations/`, and `answerEngine.js` gets a few lines to pull live data in before generating an answer. Nothing else needs to change.
+- Other dynamic knowledge source types (websites, GitHub repos, Google Sheets) — the architecture (`src/knowledge/sourceManager.js` + a per-type fetch module like `googleDocsSource.js`) is built to extend to these without changing existing code; only Google Docs is implemented so far.
 - PDF/DOCX/OCR for scanned documents — plain `.txt`, `.md`, `.pdf`, and `.docx` are supported; a scanned/image-only PDF with no text layer still needs OCR first (outside this build's scope).
+- `/backup export` doesn't currently include knowledge sources (the Google Doc links) — only the documents themselves. Worth adding if you come to rely on several linked Docs.
 - A web dashboard — everything is Discord-native for v1, per the spec's "no code editing required" principle.
 
 ---
@@ -205,7 +241,8 @@ This matches the spec's core principle: **"Should I respond?" is always asked be
 
 - **Bot shows offline:** check Railway's Deploy Logs for a crash; usually a missing/incorrect environment variable.
 - **Slash commands don't show up:** re-run `npm run deploy-commands`; global registration can take up to an hour, guild-scoped (with `DISCORD_GUILD_ID` set) is instant.
-- **`"This model models/... is no longer available to new users"`:** Google periodically restricts older model generations to API keys/projects that already had prior usage, pushing brand-new keys to the current generation. Set `GEMINI_MODEL=gemini-flash-latest` in `.env` (the default now, so update if you're on an older copy) — it auto-updates to whichever model is current instead of a hardcoded ID that can get cut off. Run `npm run list-gemini-models` to see exactly which model IDs your key can access right now if you want to pin a specific one instead.
+- **`"This model models/... is no longer available to new users"`:** Google periodically restricts older model generations to API keys/projects that already had prior usage, pushing brand-new keys to the current generation. Set `GEMINI_MODEL=gemini-flash-lite-latest` in `.env` (the default now, so update if you're on an older copy) — it auto-updates to whichever Flash-Lite model is current instead of a hardcoded ID that can get cut off. Run `npm run list-gemini-models` to see exactly which model IDs your key can access right now if you want to pin a specific one instead.
+- **`429 RESOURCE_EXHAUSTED` / quota exceeded:** you've hit Gemini's free-tier rate limit. Two different limits can trigger this: a per-minute burst limit (the bot now automatically retries once or twice with a short delay for this case) and a per-day cap. If it's the daily cap, note which model the error mentions — `gemini-flash-latest` currently resolves to a brand-new preview model Google's provisioned with only ~20 free requests/day, while `gemini-flash-lite-latest` (the default here) sits at roughly 1,000-1,500/day, which is why the Lite alias is used by default. If you're still hitting it: wait for the daily reset, enable billing on the same Google AI Studio project (cheap, instant, no waiting), or run `/ai provider openai` if you have an OpenAI key configured as a fallback.
 - **`DiscordAPIError: Unknown interaction` (code 10062):** Discord invalidates a slash command's interaction token 3 seconds after creation if nothing has replied yet. A one-off occurrence (especially right after the bot starts up) is usually just network latency — try the command again. If it happens on every command, check your PC's system clock is accurate (Windows clock drift is a common, non-obvious cause) and that your network to Discord isn't heavily throttled.
 - **Bot never responds automatically:** check `/ai status`, `/ai channels list`, and that you've approved at least one document or the topic/confidence bar is realistic for what you're asking.
 - **"Missing Access" errors:** re-invite the bot with the `applications.commands` scope and the permissions listed in Part 1.

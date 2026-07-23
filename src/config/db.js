@@ -110,6 +110,54 @@ CREATE TABLE IF NOT EXISTS config_profiles (
   saved_by TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS api_usage (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  timestamp TEXT DEFAULT CURRENT_TIMESTAMP,
+  provider TEXT NOT NULL,
+  purpose TEXT NOT NULL, -- classify | answer | embed
+  prompt_tokens INTEGER DEFAULT 0,
+  output_tokens INTEGER DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS document_versions (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  document_id INTEGER NOT NULL,
+  version TEXT NOT NULL,
+  content TEXT NOT NULL,
+  replaced_by TEXT,
+  archived_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_sources (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  type TEXT NOT NULL, -- google_doc for now; website/github/google_sheet are natural future additions
+  source_url TEXT NOT NULL,
+  external_id TEXT, -- e.g. the Google Doc ID extracted from the URL
+  document_id INTEGER NOT NULL,
+  content_hash TEXT,
+  sync_enabled INTEGER NOT NULL DEFAULT 1,
+  last_synced_at TEXT,
+  last_sync_status TEXT,
+  added_by TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
 `);
+
+// --- Lightweight migrations for columns added after initial release ---
+// better-sqlite3/SQLite has no "ADD COLUMN IF NOT EXISTS", so each of
+// these is attempted and a "duplicate column" failure is treated as
+// "already migrated" rather than an error. This keeps existing databases
+// (with existing knowledge bases) upgradable in place, without a wipe.
+function addColumnIfMissing(table, columnDef) {
+  try {
+    db.exec(`ALTER TABLE ${table} ADD COLUMN ${columnDef}`);
+  } catch (err) {
+    if (!/duplicate column/i.test(err.message)) throw err;
+  }
+}
+addColumnIfMissing('logs', 'topic TEXT');
 
 module.exports = db;

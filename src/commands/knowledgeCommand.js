@@ -5,6 +5,9 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const permissionEngine = require('../permissions/permissionEngine');
 const documentManager = require('../knowledge/documentManager');
 const textExtractor = require('../knowledge/textExtractor');
+const configManager = require('../config/configManager');
+
+const MUTATING_SUBCOMMANDS = ['upload', 'approve', 'reject', 'archive', 'delete', 'reindex', 'update'];
 
 function requireAdmin(interaction) {
   return permissionEngine.requireAdmin(interaction);
@@ -35,6 +38,12 @@ const data = new SlashCommandBuilder()
     .addIntegerOption(o => o.setName('id').setDescription('Document ID').setRequired(true)))
   .addSubcommand(sc => sc.setName('reindex').setDescription('Re-index an approved document (after editing)')
     .addIntegerOption(o => o.setName('id').setDescription('Document ID').setRequired(true)))
+  .addSubcommand(sc => sc.setName('update')
+    .setDescription('Replace a document\'s content with a new file, keeping version history (Section 37)')
+    .addIntegerOption(o => o.setName('id').setDescription('Document ID').setRequired(true))
+    .addAttachmentOption(o => o.setName('file').setDescription('Replacement file (.txt, .md, .pdf, or .docx)').setRequired(true)))
+  .addSubcommand(sc => sc.setName('versions').setDescription('Show version history for a document')
+    .addIntegerOption(o => o.setName('id').setDescription('Document ID').setRequired(true)))
   .addSubcommand(sc => sc.setName('list').setDescription('List documents')
     .addStringOption(o => o.setName('status').setDescription('Filter by status').setRequired(false)
       .addChoices(
@@ -46,6 +55,13 @@ const data = new SlashCommandBuilder()
 async function execute(interaction) {
   if (!requireAdmin(interaction)) return;
   const sub = interaction.options.getSubcommand();
+
+  if (MUTATING_SUBCOMMANDS.includes(sub) && configManager.getBool('lockdown_enabled')) {
+    return interaction.reply({
+      content: '🔒 UNAI is in emergency lockdown (`/ai lockdown`) — knowledge base changes are paused until it\'s lifted.',
+      ephemeral: true
+    });
+  }
 
   if (sub === 'upload') {
     await interaction.deferReply({ ephemeral: true });
@@ -102,6 +118,46 @@ async function execute(interaction) {
     const id = interaction.options.getInteger('id');
     const chunkCount = await documentManager.reindexDocument(id);
     return interaction.editReply(`Document ${id} re-indexed (${chunkCount} chunks).`);
+  }
+
+  if (sub === 'update') {
+    await interaction.deferReply({ ephemeral: true });
+    const id = interaction.options.getInteger('id');
+    const attachment = interaction.options.getAttachment('file');
+
+    if (!textExtractor.isSupported(attachment.name)) {
+      return interaction.editReply(`Unsupported file type. Supported: ${textExtractor.SUPPORTED_EXTENSIONS.join(', ')}`);
+    }
+    let content;
+    try {
+      content = await textExtractor.extractText(attachment);
+    } catch (err) {
+      return interaction.editReply(`Couldn't read that file: ${err.message}`);
+    }
+
+    try {
+      const result = await documentManager.updateDocumentContent(id, content);
+      return interaction.editReply(
+        `Document ${id} updated to version **${result.newVersion}** (previous version **${result.previousVersion}** preserved in history — see \`/knowledge versions id:${id}\`).` +
+        (result.reindexed ? ` Re-indexed (${result.chunkCount} chunks).` : ' Not currently approved, so it was not re-indexed — approve it to make it searchable.')
+      );
+    } catch (err) {
+      return interaction.editReply(`Failed to update document: ${err.message}`);
+    }
+  }
+
+  if (sub === 'versions') {
+    const id = interaction.options.getInteger('id');
+    const doc = documentManager.getDocument(id);
+    if (!doc) return interaction.reply({ content: `No document with ID ${id}.`, ephemeral: true });
+    const history = documentManager.getVersionHistory(id);
+    const lines = [`**${doc.title}** — current version **${doc.version}**`];
+    if (history.length === 0) {
+      lines.push('*No prior versions — this document has never been updated.*');
+    } else {
+      for (const v of history) lines.push(`— version ${v.version} (archived ${v.archived_at})`);
+    }
+    return interaction.reply({ content: lines.join('\n'), ephemeral: true });
   }
 
   if (sub === 'list') {

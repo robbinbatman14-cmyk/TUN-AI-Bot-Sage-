@@ -10,6 +10,7 @@ const db = require('./db');
 
 const DEFAULTS = {
   ai_enabled: 'true',
+  lockdown_enabled: 'false',
   trigger_mode: 'hybrid', // tagged | smart | hybrid
   confidence_threshold: '90',
   personality: 'professional', // professional | friendly | mentor
@@ -18,7 +19,8 @@ const DEFAULTS = {
   cooldown_per_user_seconds: '20',
   cooldown_per_channel_per_minute: '6',
   ai_provider: process.env.AI_PROVIDER || 'gemini',
-  escalation_channel_id: ''
+  escalation_channel_id: '',
+  google_doc_sync_interval_minutes: '60'
 };
 
 const getStmt = db.prepare('SELECT value FROM config WHERE key = ?');

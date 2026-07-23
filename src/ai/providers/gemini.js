@@ -7,6 +7,7 @@
 // no matter which provider is active (Section 107).
 // ============================================================
 const { GoogleGenAI } = require('@google/genai');
+const usageTracker = require('../../logging/usageTracker');
 
 const client = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -90,6 +91,17 @@ async function chat(messages, opts = {}) {
   if (typeof text !== 'string') {
     throw new Error('Gemini returned an unexpected response shape (no .text field). The response may have been blocked by safety filters.');
   }
+
+  const usage = response.usageMetadata;
+  if (usage) {
+    usageTracker.logUsage({
+      provider: 'gemini',
+      purpose: opts.purpose || 'unknown',
+      promptTokens: usage.promptTokenCount || 0,
+      outputTokens: usage.candidatesTokenCount || 0
+    });
+  }
+
   return text;
 }
 
@@ -103,6 +115,14 @@ async function embed(text) {
   const values = response.embeddings?.[0]?.values || response.embedding?.values;
   if (!values) {
     throw new Error('Gemini embedding response did not contain the expected values array. The @google/genai SDK may have changed shape — check response.embeddings[0].values.');
+  }
+  if (response.usageMetadata) {
+    usageTracker.logUsage({
+      provider: 'gemini',
+      purpose: 'embed',
+      promptTokens: response.usageMetadata.promptTokenCount || 0,
+      outputTokens: 0
+    });
   }
   return values;
 }
