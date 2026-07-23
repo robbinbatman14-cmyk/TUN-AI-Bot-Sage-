@@ -44,7 +44,7 @@ Switching is just `/ai provider openai` (or `anthropic`) in Discord — no code 
 
 ## Part 3 — Run it locally in VS Code (to test before deploying)
 
-### Which Node.js version to use
+### Which Node.js version to use.
 
 This project was built and syntax-tested on **Node 22** (specifically v22.22.2). Use **Node 22 LTS**, or **Node 20 LTS** if you'd rather — both have prebuilt `better-sqlite3` binaries available, so `npm install` just downloads a precompiled binary and finishes in seconds with no compiler needed.
 
