@@ -44,7 +44,7 @@ Switching is just `/ai provider openai` (or `anthropic`) in Discord — no code 
 
 ## Part 3 — Run it locally in VS Code (to test before deploying)
 
-### Which Node.js version to use.
+### Which Node.js version to use
 
 This project was built and syntax-tested on **Node 22** (specifically v22.22.2). Use **Node 22 LTS**, or **Node 20 LTS** if you'd rather — both have prebuilt `better-sqlite3` binaries available, so `npm install` just downloads a precompiled binary and finishes in seconds with no compiler needed.
 
@@ -166,6 +166,12 @@ Your bot is now running 24/7. Railway restarts it automatically if it crashes (`
 | `/knowledge versions id:X` | View a document's version history |
 | `/sources add-google-doc link:... title:... category:...` | Link a Google Doc as a live-syncing knowledge source |
 | `/sources list` / `sync` / `enable` / `disable` / `remove` | Manage knowledge sources |
+| `/pnw nation lookup query:...` | Live nation lookup (name, leader name, or ID) |
+| `/pnw alliance lookup query:...` / `/pnw alliance top` | Live alliance lookup / rankings |
+| `/pnw verify link nation_id:X` | Self-serve: link your Discord to your nation |
+| `/pnw verify link-for user:@X nation_id:Y` | Admin: link on someone's behalf |
+| `/pnw verify whois` / `unlink` / `list` | Look up, remove, or list Discord↔nation links |
+| `/pnw cache clear` / `status` | Manage the live-data cache |
 | `/faq add/list/delete` | Manage quick FAQ answers |
 | `/profile save/load/list/delete` | Save/apply named configuration snapshots (e.g. `war-mode`, `peace-mode`) |
 | `/backup export` / `/backup import` | Download or restore a full backup (config, channels, topics, permissions, FAQ, documents) |
@@ -211,6 +217,42 @@ Instead of exporting and re-uploading a document every time it changes, you can 
 
 **Sync interval:** defaults to every 60 minutes. Change it by editing the `google_doc_sync_interval_minutes` config value directly in the database, or ask me to add a slash command for it if you'll want to change this often — I kept it out of the command surface for now to avoid it feeling like a dial you need to touch.
 
+### Live Politics & War data + hybrid intelligence
+
+UNAI can now answer from three kinds of source in one response: your uploaded documents, live Politics & War game data, or both — and it decides which to use automatically, per question.
+
+**Setup:** add `PNW_API_KEY` to `.env` (get one from your P&W account: My Account → API Key). No restart-free config command for this one — it's a credential, so it lives in the environment like your Discord/Gemini keys.
+
+**How the routing works:** the same classification step that already decides whether a message is a question also decides whether it needs *current* game data (a specific nation's live stats, an alliance's current ranking/members, top-alliance rankings) versus static knowledge (policy, guides, the Constitution). "What's TUN's academy system?" stays a knowledge-base question; "how many cities does Odyssey have?" triggers a live lookup. Both can fire in the same answer if a question genuinely needs both — the live data just becomes another retrieved-context block alongside your documents, with its own citation.
+
+**"Who is @X" Discord lookups** are detected directly by pattern-matching the message for an actual Discord @mention plus "who is/who's" — not by the AI guessing at a Discord ID from text, which would be unreliable. This only works for members who've linked their nation (see below); unlinked members get a message explaining how to link rather than a made-up answer.
+
+**Linking a Discord account to a nation:**
+- Self-serve: `/pnw verify link nation_id:12345`. This only succeeds if the Discord Username field on that P&W nation (set in-game, on your nation's edit page) matches your actual Discord username — so you can't link someone else's nation to yourself.
+- Admin override: `/pnw verify link-for user:@Member nation_id:12345` — no matching check, for cases where a member hasn't set that field in-game.
+- One known limitation worth knowing: since the in-game Discord Username field is self-reported by each nation's owner, someone could in principle set it to a name that isn't really theirs. This isn't a serious exploit (they'd still need to control that Discord account to run the self-serve command), but it's not cryptographic proof of identity — for anything where that distinction actually matters, admin-verified linking is the safer path.
+
+**Caching:** live lookups are cached briefly (nations/alliances: 10 min, alliance member lists: 5 min, top-alliance rankings: 15 min) to avoid hammering the P&W API on repeated questions. `/pnw cache clear` forces fresh data immediately if something looks stale.
+
+**Not built in this pass** (flagged honestly rather than silently missing): active war lookups ("who is fighting right now") and vacation-mode/beige-status roster queries beyond a single nation's own status. The architecture (`src/integrations/pnw/`) supports adding these the same way nation/alliance lookups were added — a new query function plus a branch in the classifier's `live_data.type` — happy to build them next if useful.
+
+### Conversational reasoning — follow-ups, synthesis, and general Politics & War help
+
+UNAI now behaves less like a search box and more like a real conversational assistant, while keeping the "never guess alliance-specific facts" guardrail exactly as strict as before. Three concrete changes:
+
+**Follow-up questions work now.** Previously the bot only remembered *your* messages, never its own replies — so "who is the Minister of Economy?" → "what are his responsibilities?" couldn't work, because "his" had nothing in memory to resolve against. UNAI's own replies are now part of the short-term conversation memory (still capped at ~12 recent turns per channel, still expires after 10 minutes — nothing permanent), so pronouns and follow-ups resolve naturally. Worth knowing: memory is per-channel, not per-user — if two members are both asking ambiguous follow-ups in the same channel at the same time, context could occasionally cross-thread between them. Fine for the normal case of one conversation at a time in a channel; something to watch for in a very busy channel.
+
+**It reasons across documents instead of requiring an exact match.** If your Constitution says the Secretary-General appoints ministers, and separately says ministers oversee their ministries, "who ultimately manages the ministries?" now gets answered by combining those two facts — not just by searching for a sentence that happens to say it directly. This is still bounded: the reasoning has to actually follow from what's retrieved, not from thin air.
+
+**Two answer modes, chosen automatically per question:**
+- *Alliance-specific* questions (TUN's own policy, positions, procedures, numbers) stay exactly as strict as before — grounded only in retrieved documents/live data, refuses to guess if nothing relevant is found. Nothing changed here.
+- *General-knowledge* questions (Politics & War mechanics, strategy comparisons, "should I build another city", infrastructure/revenue/loan math, teaching a newer player) now get answered from the model's own reasoning, even with zero documents uploaded on that topic — since these were never things your knowledge base could realistically cover for every possible member question anyway.
+- *Mixed* questions (e.g. "why did my audit fail" — TUN's actual audit standard plus reasoning about the member's own numbers) get both: strict on the policy part, reasoned on the rest, with the response staying clear about which is which.
+
+`Official Answers Only` mode now only restricts the alliance-specific side of a question — it no longer blocks general Politics & War help, since that mode was designed to stop the bot from inventing TUN policy, not from explaining how beige works.
+
+**One honest limitation:** math is done by the model's own arithmetic reasoning in its response, not by a separate verified calculator — there's no code-execution or tool-calling loop wired into the AI calls (a real one would be a meaningfully larger addition across all three providers). This is generally reliable for the kind of numbers a Discord bot gets asked about, but isn't guaranteed exact for complex multi-step calculations — worth a second look before anyone treats a generated number as gospel for a real financial decision. Happy to build genuine verified-calculator tool-calling next if this turns out to matter in practice.
+
 ## How it actually decides to respond (for your own understanding)
 
 1. Ignores bots, webhooks, DMs.
@@ -228,11 +270,12 @@ This matches the spec's core principle: **"Should I respond?" is always asked be
 
 ## What's genuinely NOT built yet (by design, per your call on scope)
 
-- **Live Politics & War API integration** (alliance/nation lookups, "who is @X" Discord-to-nation linking) — this is next up, by your priority call. Unlike the Banking/Audit/Legislation bots, the P&W API is real and public, so this is fully buildable now.
+- **Verified calculator / tool-calling** — math is currently the model's own arithmetic reasoning in its text response, not a separate executed calculation. Reliable for typical Discord-bot-scale numbers, not guaranteed exact for complex multi-step math. A real fix means wiring function-calling/tool-execution into all three AI providers — a meaningfully bigger change than the reasoning-prompt work done here.
+- **Active war lookups and broader roster queries** (who's fighting right now, alliance-wide vacation/beige rosters) — nation/alliance/top-alliance lookups and Discord-nation linking are built; wars are the natural next addition to `src/integrations/pnw/`.
 - Live integrations with Banking / Audit / Legislation / Activity / Election bots (Sections 47–54) — nothing exists yet to connect to. When one of those bots has a database or API, a new file goes in `src/integrations/`, and `answerEngine.js` gets a few lines to pull live data in before generating an answer. Nothing else needs to change.
 - Other dynamic knowledge source types (websites, GitHub repos, Google Sheets) — the architecture (`src/knowledge/sourceManager.js` + a per-type fetch module like `googleDocsSource.js`) is built to extend to these without changing existing code; only Google Docs is implemented so far.
 - PDF/DOCX/OCR for scanned documents — plain `.txt`, `.md`, `.pdf`, and `.docx` are supported; a scanned/image-only PDF with no text layer still needs OCR first (outside this build's scope).
-- `/backup export` doesn't currently include knowledge sources (the Google Doc links) — only the documents themselves. Worth adding if you come to rely on several linked Docs.
+- `/backup export` doesn't currently include knowledge sources (the Google Doc links) or nation-verification links — only documents themselves. Worth adding if you come to rely on either heavily.
 - A web dashboard — everything is Discord-native for v1, per the spec's "no code editing required" principle.
 
 ---

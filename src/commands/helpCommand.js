@@ -29,6 +29,7 @@ const CATEGORY_ORDER = [
   'Configuration & Administration',
   'Knowledge Base',
   'Knowledge Sources',
+  'Live Politics & War Data',
   'FAQ',
   'Configuration Profiles',
   'Backup & Restore',

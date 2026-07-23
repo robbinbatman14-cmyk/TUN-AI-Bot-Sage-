@@ -15,6 +15,10 @@ const logger = require('../logging/logger');
 const security = require('../security/securityMonitor');
 
 // Short-lived per-channel memory (Section 20). Expires after 10 minutes.
+// Includes UNAI's own replies, not just human messages — this is what
+// lets a follow-up like "what are HIS responsibilities?" resolve "his"
+// against something UNAI itself said two turns ago, not just against
+// another member's message.
 const CONTEXT_TTL_MS = 10 * 60 * 1000;
 const channelContext = new Map(); // channelId -> [{author, content, ts}]
 
@@ -22,7 +26,7 @@ function pushContext(channelId, author, content) {
   const now = Date.now();
   const list = (channelContext.get(channelId) || []).filter(m => now - m.ts < CONTEXT_TTL_MS);
   list.push({ author, content, ts: now });
-  channelContext.set(channelId, list.slice(-8)); // keep last 8 messages
+  channelContext.set(channelId, list.slice(-12)); // keep last 12 turns (was 8 — bot replies now also take slots)
 }
 
 function getContextText(channelId) {
@@ -106,7 +110,7 @@ async function process(message, { wasMentioned, guildMember }) {
   // Stage: question detection + topic classification (skipped only
   // when directly mentioned AND trigger mode is tagged-only, since
   // a direct mention is unambiguous intent to engage).
-  let classification = { is_question: true, on_topic: true, topic: 'direct_mention' };
+  let classification = { is_question: true, on_topic: true, topic: 'direct_mention', question_type: 'mixed', live_data: { needed: false, type: null, entity_name: null } };
   if (!(wasMentioned && mode === 'tagged')) {
     classification = await classifier.classify(message.content, contextText);
   }
@@ -129,7 +133,7 @@ async function process(message, { wasMentioned, guildMember }) {
   const level = permissionEngine.getMemberLevel(guildMember);
 
   // Stage: retrieval + grounded generation + confidence
-  const result = await answerEngine.answer(message.content, level, contextText);
+  const result = await answerEngine.answer(message.content, level, contextText, classification);
 
   const threshold = configManager.getNumber('confidence_threshold');
 
@@ -149,11 +153,20 @@ async function process(message, { wasMentioned, guildMember }) {
   }
 
   if (result.confidence < threshold) {
-    // Below threshold: defer to government rather than guess (Section 17).
-    const payload = {
-      text: `I'm not confident enough in an answer to this (${result.confidence}%, below the ${threshold}% threshold). A government member should weigh in — I've flagged this for them.`,
-      escalate: true
-    };
+    // Below threshold: defer rather than guess (Section 17). What "defer"
+    // means depends on question type — an alliance-specific gap genuinely
+    // needs a government member; a general-knowledge gap is just the model
+    // being unsure about game trivia, which pinging government won't fix.
+    const isGeneralKnowledge = classification.question_type === 'general_knowledge';
+    const payload = isGeneralKnowledge
+      ? {
+          text: `I'm not fully confident about this one (${result.confidence}%) — worth double-checking against the P&W wiki or another player rather than taking my word for it.`,
+          escalate: false
+        }
+      : {
+          text: `I'm not confident enough in an answer to this (${result.confidence}%, below the ${threshold}% threshold). A government member should weigh in — I've flagged this for them.`,
+          escalate: true
+        };
     logger.logInteraction({
       userId: message.author.id,
       channelId: message.channel.id,
@@ -161,11 +174,12 @@ async function process(message, { wasMentioned, guildMember }) {
       response: payload.text,
       confidence: result.confidence,
       documentsUsed: result.documentsConsulted,
-      escalated: true,
+      escalated: payload.escalate,
       responseTimeMs: Date.now() - startTime,
       topic: classification.topic
     });
     cooldown.recordResponse(message.author.id, message.channel.id);
+    pushContext(message.channel.id, 'UNAI', payload.text);
     return { action: 'respond', payload };
   }
 
@@ -175,7 +189,11 @@ async function process(message, { wasMentioned, guildMember }) {
   if (citationsMode === 'always' && result.sources?.length) {
     text += `\n\n*Source: ${result.sources.join('; ')}*`;
   }
-  if (result.confidence < 95) {
+  // Only nudge toward a government member for alliance-specific/mixed
+  // answers below full confidence — for a pure general-knowledge or math
+  // answer, "a government member can clarify" doesn't mean anything.
+  const questionType = classification.question_type || 'alliance_specific';
+  if (result.confidence < 95 && questionType !== 'general_knowledge') {
     text += `\n\n*(A government member can clarify further if needed.)*`;
   }
 
@@ -191,6 +209,7 @@ async function process(message, { wasMentioned, guildMember }) {
     topic: classification.topic
   });
   cooldown.recordResponse(message.author.id, message.channel.id);
+  pushContext(message.channel.id, 'UNAI', result.answer);
 
   return {
     action: 'respond',

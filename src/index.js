@@ -16,6 +16,7 @@ const reviewCommand = require('./commands/reviewCommand');
 const profileCommand = require('./commands/profileCommand');
 const backupCommand = require('./commands/backupCommand');
 const sourcesCommand = require('./commands/sourcesCommand');
+const pnwCommand = require('./commands/pnwCommand');
 const helpCommand = require('./commands/helpCommand');
 
 const client = new Client({
@@ -29,7 +30,7 @@ const client = new Client({
 });
 
 client.commands = new Collection();
-for (const cmd of [aiCommand, knowledgeCommand, faqCommand, reviewCommand, profileCommand, backupCommand, sourcesCommand, helpCommand]) {
+for (const cmd of [aiCommand, knowledgeCommand, faqCommand, reviewCommand, profileCommand, backupCommand, sourcesCommand, pnwCommand, helpCommand]) {
   client.commands.set(cmd.data.name, cmd);
 }
 

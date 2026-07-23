@@ -144,6 +144,16 @@ CREATE TABLE IF NOT EXISTS knowledge_sources (
   created_at TEXT DEFAULT CURRENT_TIMESTAMP,
   FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS nation_links (
+  discord_id TEXT PRIMARY KEY,
+  nation_id INTEGER NOT NULL UNIQUE,
+  nation_name TEXT,
+  leader_name TEXT,
+  linked_by TEXT,
+  method TEXT, -- self_verified | admin_override
+  linked_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
 `);
 
 // --- Lightweight migrations for columns added after initial release ---
