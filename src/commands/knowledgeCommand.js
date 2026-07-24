@@ -125,8 +125,12 @@ async function execute(interaction) {
   if (sub === 'reindex') {
     await interaction.deferReply({ ephemeral: true });
     const id = interaction.options.getInteger('id');
-    const chunkCount = await documentManager.reindexDocument(id);
-    return interaction.editReply(`Document ${id} re-indexed (${chunkCount} chunks).`);
+    try {
+      const chunkCount = await documentManager.reindexDocument(id);
+      return interaction.editReply(`Document ${id} re-indexed (${chunkCount} chunks).`);
+    } catch (err) {
+      return interaction.editReply(`Failed to re-index document ${id}: ${err.message}`);
+    }
   }
 
   if (sub === 'update') {

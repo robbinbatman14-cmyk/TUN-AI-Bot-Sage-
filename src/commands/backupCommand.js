@@ -48,10 +48,15 @@ async function execute(interaction) {
 
     try {
       const result = await backupManager.importBackup(backup);
-      return interaction.editReply(
-        `Restore complete: ${result.documentsRestored} document(s) restored, ${result.reindexed} re-indexed and searchable` +
-        (result.reindexFailures ? `, ${result.reindexFailures} failed to re-index (check \`/knowledge list\` and re-run \`/knowledge reindex\` on those).` : '.')
-      );
+      let text = `Restore complete: ${result.documentsRestored} document(s) restored, ${result.reindexed} re-indexed and searchable`;
+      if (result.reindexFailures) {
+        text += `, ${result.reindexFailures} failed to re-index:\n`;
+        text += result.reindexErrors.map(e => `— "${e.title}": ${e.error}`).join('\n');
+        text += `\n\nThe documents themselves are restored and safe — they just won't show up in search until re-indexed. Once the underlying issue above is resolved, run \`/knowledge reindex id:X\` for each (see \`/knowledge list\` for their IDs).`;
+      } else {
+        text += '.';
+      }
+      return interaction.editReply(text.slice(0, 1900));
     } catch (err) {
       return interaction.editReply(`Import failed: ${err.message}`);
     }

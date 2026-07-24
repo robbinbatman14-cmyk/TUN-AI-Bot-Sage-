@@ -28,7 +28,7 @@ function exportBackup() {
 /**
  * Restores config/channels/topics/permissions/FAQ/documents from a backup
  * object. Approved documents are re-indexed (costs embedding API calls).
- * @returns {Promise<{documentsRestored: number, reindexed: number, reindexFailures: number}>}
+ * @returns {Promise<{documentsRestored: number, reindexed: number, reindexFailures: number, reindexErrors: Array<{title: string, error: string}>}>}
  */
 async function importBackup(backup) {
   if (!backup || typeof backup !== 'object' || !Array.isArray(backup.config)) {
@@ -51,6 +51,7 @@ async function importBackup(backup) {
   for (const row of backup.faq || []) addFaq.run(row.question, row.answer, row.category, row.keywords, row.priority || 0);
 
   let documentsRestored = 0, reindexed = 0, reindexFailures = 0;
+  const reindexErrors = [];
   for (const doc of backup.documents || []) {
     const id = documentManager.addDocument({
       title: doc.title, category: doc.category, visibility: doc.visibility,
@@ -61,13 +62,15 @@ async function importBackup(backup) {
       try {
         await documentManager.approveDocument(id); // also indexes it
         reindexed++;
-      } catch {
+      } catch (err) {
         reindexFailures++;
+        console.error(`[UNAI] Backup restore: failed to re-index "${doc.title}" (new id ${id}):`, err.message);
+        reindexErrors.push({ title: doc.title, error: err.message });
       }
     }
   }
 
-  return { documentsRestored, reindexed, reindexFailures };
+  return { documentsRestored, reindexed, reindexFailures, reindexErrors };
 }
 
 module.exports = { exportBackup, importBackup };
