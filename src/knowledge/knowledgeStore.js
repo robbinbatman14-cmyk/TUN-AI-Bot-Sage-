@@ -1,16 +1,23 @@
 // ============================================================
 // Knowledge Store (Sections 26-44, 111)
 // A lightweight, dependency-free vector store built on SQLite:
-// documents are split into chunks, each chunk gets an OpenAI
-// embedding, and search does cosine similarity in JS. This is
-// plenty fast for an alliance-sized knowledge base (hundreds of
-// documents) without needing a hosted vector database service.
+// documents are split into chunks, each chunk gets an embedding,
+// and search does cosine similarity in JS. This is plenty fast
+// for an alliance-sized knowledge base (hundreds of documents)
+// without needing a hosted vector database service.
 // ============================================================
 const db = require('../config/db');
 const ai = require('../ai/providerManager');
+const { createTTLCache } = require('../utils/ttlCache');
 
 const CHUNK_SIZE = 900;      // ~characters per chunk
 const CHUNK_OVERLAP = 150;
+
+// Repeated/duplicate questions are common in an alliance Discord (many
+// members asking "how do I get a grant" independently) — caching the
+// query embedding for an hour avoids spending a fresh embedding request
+// on text that was already embedded recently.
+const queryEmbeddingCache = createTTLCache();
 
 function chunkText(text) {
   const chunks = [];
@@ -35,8 +42,11 @@ function cosineSimilarity(a, b) {
 }
 
 /**
- * Index (or re-index) a single document: deletes old chunks,
- * splits content, embeds each chunk, stores the vectors.
+ * Index (or re-index) a single document: deletes old chunks, splits
+ * content, embeds ALL chunks in one batched request (see
+ * providerManager.embedBatch) rather than one request per chunk, then
+ * stores the vectors. This is the main lever for embedding-quota usage
+ * on the indexing side — a 20-chunk document costs 1 request, not 20.
  */
 async function indexDocument(documentId) {
   const doc = db.prepare('SELECT * FROM documents WHERE id = ?').get(documentId);
@@ -45,13 +55,15 @@ async function indexDocument(documentId) {
   db.prepare('DELETE FROM chunks WHERE document_id = ?').run(documentId);
 
   const pieces = chunkText(doc.content);
+  if (pieces.length === 0) return 0;
+
+  const embeddings = await ai.embedBatch(pieces);
+
   const insert = db.prepare(
     'INSERT INTO chunks (document_id, chunk_index, content, embedding) VALUES (?, ?, ?, ?)'
   );
-
   for (let i = 0; i < pieces.length; i++) {
-    const embedding = await ai.embed(pieces[i]);
-    insert.run(documentId, i, pieces[i], JSON.stringify(embedding));
+    insert.run(documentId, i, pieces[i], JSON.stringify(embeddings[i]));
   }
   db.prepare('UPDATE documents SET updated_at = CURRENT_TIMESTAMP WHERE id = ?').run(documentId);
   return pieces.length;
@@ -64,7 +76,13 @@ async function indexDocument(documentId) {
  */
 async function search(query, { level, topK = 5 } = {}) {
   const permissions = require('../permissions/permissionEngine');
-  const queryEmbedding = await ai.embed(query);
+
+  const cacheKey = query.trim().toLowerCase();
+  let queryEmbedding = queryEmbeddingCache.get(cacheKey);
+  if (queryEmbedding === undefined) {
+    queryEmbedding = await ai.embed(query);
+    queryEmbeddingCache.set(cacheKey, queryEmbedding, 3600); // 1 hour
+  }
 
   const rows = db.prepare(`
     SELECT chunks.id as chunk_id, chunks.content, chunks.embedding,
@@ -87,4 +105,4 @@ async function search(query, { level, topK = 5 } = {}) {
   return scored.map(({ embedding, ...rest }) => rest); // don't leak raw vectors upward
 }
 
-module.exports = { indexDocument, search, chunkText };
+module.exports = { indexDocument, search, chunkText, queryEmbeddingCache };

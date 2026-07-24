@@ -73,8 +73,22 @@ You must respond ONLY with valid JSON of this exact shape:
  * @param {object} [classification] - output of classifier.classify(); question_type drives how strictly grounded the answer must be
  */
 async function answer(question, level, contextText = '', classification = null) {
-  const faqHits = faqManager.findRelevant(question, 3);
-  const chunks = await knowledgeStore.search(question, { level, topK: 5 });
+  const questionType = classification?.question_type || 'alliance_specific';
+
+  const faqHits = faqManager.findRelevant(question, 3); // keyword-only, zero embedding cost — always fine to run
+
+  // Skip the knowledge-base vector search — and therefore its embedding
+  // API call — entirely for pure general-knowledge questions. There's
+  // nothing alliance-specific to retrieve for "explain beige mechanics"
+  // or a raw infrastructure-cost calculation, so searching was previously
+  // spending one embedding request per question regardless of whether it
+  // could possibly help. This is the main lever for embedding-quota usage,
+  // since every message that reached this function used to cost one
+  // embedding call no matter its type.
+  const chunks = questionType === 'general_knowledge'
+    ? []
+    : await knowledgeStore.search(question, { level, topK: 5 });
+
   const liveData = await liveDataFetcher.fetchRelevantLiveData(classification, question);
 
   const contextBlocks = [
@@ -86,8 +100,6 @@ async function answer(question, level, contextText = '', classification = null) 
   const retrievedContext = contextBlocks.length > 0
     ? contextBlocks.join('\n\n---\n\n')
     : '(No relevant official documentation or live game data was found for this question. If this is a general_knowledge question, that\'s fine — answer from your own knowledge instead.)';
-
-  const questionType = classification?.question_type || 'alliance_specific';
 
   const messages = [
     { role: 'system', content: buildSystemPrompt() },

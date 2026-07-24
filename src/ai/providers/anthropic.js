@@ -43,4 +43,8 @@ async function embed() {
   throw new Error('Anthropic does not provide an embeddings API. Embeddings fall back to Gemini/OpenAI — see src/ai/providerManager.js.');
 }
 
-module.exports = { chat, embed, name: 'anthropic' };
+async function embedBatch() {
+  throw new Error('Anthropic does not provide an embeddings API. Embeddings fall back to Gemini/OpenAI — see src/ai/providerManager.js.');
+}
+
+module.exports = { chat, embed, embedBatch, name: 'anthropic' };

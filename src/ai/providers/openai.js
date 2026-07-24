@@ -30,8 +30,16 @@ async function chat(messages, opts = {}) {
   return res.choices[0].message.content;
 }
 
-async function embed(text) {
-  const res = await client.embeddings.create({ model: EMBED_MODEL, input: text });
+/**
+ * OpenAI's embeddings endpoint accepts an array of inputs in one request,
+ * same batching benefit as Gemini's — used so document indexing costs
+ * one request regardless of chunk count.
+ * @param {string[]} texts
+ * @returns {Promise<number[][]>}
+ */
+async function embedBatch(texts) {
+  if (texts.length === 0) return [];
+  const res = await client.embeddings.create({ model: EMBED_MODEL, input: texts });
   if (res.usage) {
     usageTracker.logUsage({
       provider: 'openai',
@@ -40,7 +48,12 @@ async function embed(text) {
       outputTokens: 0
     });
   }
-  return res.data[0].embedding;
+  return res.data.map(d => d.embedding);
 }
 
-module.exports = { chat, embed, name: 'openai' };
+async function embed(text) {
+  const [vector] = await embedBatch([text]);
+  return vector;
+}
+
+module.exports = { chat, embed, embedBatch, name: 'openai' };

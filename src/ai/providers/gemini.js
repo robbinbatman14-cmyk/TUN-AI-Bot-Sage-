@@ -105,26 +105,50 @@ async function chat(messages, opts = {}) {
   return text;
 }
 
-async function embed(text) {
-  const response = await client.models.embedContent({
-    model: EMBED_MODEL,
-    contents: text
-  });
-  // The SDK has shifted this response shape across versions, so check
-  // both the current and previous known locations before giving up.
-  const values = response.embeddings?.[0]?.values || response.embedding?.values;
-  if (!values) {
-    throw new Error('Gemini embedding response did not contain the expected values array. The @google/genai SDK may have changed shape — check response.embeddings[0].values.');
+// Community-reported practical cap on how many texts Gemini's
+// batchEmbedContents endpoint accepts per call; chunked conservatively
+// under that so a very large document still works, just in more than
+// one request rather than one-per-chunk.
+const EMBED_BATCH_SIZE = 100;
+
+/**
+ * Embeds many texts in as few API requests as possible. This is the
+ * main lever for free-tier embedding quota: Gemini's embedContent
+ * endpoint accepts an array and returns one embedding per input while
+ * only counting as ONE request against the daily quota — so indexing
+ * a 20-chunk document costs 1 request here instead of 20.
+ * @param {string[]} texts
+ * @returns {Promise<number[][]>} one embedding vector per input, same order
+ */
+async function embedBatch(texts) {
+  if (texts.length === 0) return [];
+
+  const allValues = [];
+  for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
+    const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
+    const response = await client.models.embedContent({ model: EMBED_MODEL, contents: batch });
+
+    const values = response.embeddings?.map(e => e.values);
+    if (!values || values.length !== batch.length) {
+      throw new Error(`Gemini batch embedding response didn't return one vector per input (expected ${batch.length}, got ${values?.length ?? 0}).`);
+    }
+    allValues.push(...values);
+
+    if (response.usageMetadata) {
+      usageTracker.logUsage({
+        provider: 'gemini',
+        purpose: 'embed',
+        promptTokens: response.usageMetadata.promptTokenCount || 0,
+        outputTokens: 0
+      });
+    }
   }
-  if (response.usageMetadata) {
-    usageTracker.logUsage({
-      provider: 'gemini',
-      purpose: 'embed',
-      promptTokens: response.usageMetadata.promptTokenCount || 0,
-      outputTokens: 0
-    });
-  }
-  return values;
+  return allValues;
 }
 
-module.exports = { chat, embed, name: 'gemini' };
+async function embed(text) {
+  const [vector] = await embedBatch([text]);
+  return vector;
+}
+
+module.exports = { chat, embed, embedBatch, name: 'gemini' };
