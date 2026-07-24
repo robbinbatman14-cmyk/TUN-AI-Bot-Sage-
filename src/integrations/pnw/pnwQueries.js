@@ -1,11 +1,17 @@
 // ============================================================
 // P&W Queries
 // Each function is cached (see pnwCache.js) with a TTL suited to
-// how fast that data actually changes. Nation/alliance lookups try
-// the most likely field first (name), then fall back to a second
-// likely field (leader name / acronym) since a member typing
-// "tell me about Odyssey" might mean either the nation or its
-// leader's name.
+// how fast that data actually changes. Nation lookups try the most
+// likely field first (name), then fall back to leader name, since
+// a member typing "tell me about Odyssey" might mean either the
+// nation or its leader's name — both are confirmed-valid filter
+// arguments on the `nations` query. Alliance acronym/partial-name
+// matching is done client-side against a cached index (see
+// getAllianceIndex) rather than a server-side filter, since
+// `acronym` is confirmed NOT to be a valid filter argument on the
+// `alliances` query (a real "Unknown argument" error from the live
+// API caught this) — a lesson in not trusting guessed field names
+// past what's actually been verified against the live schema.
 // ============================================================
 const client = require('./pnwClient');
 const cache = require('./pnwCache');
@@ -79,27 +85,59 @@ async function getNationByName(name) {
   return nation || null;
 }
 
+/**
+ * A cached snapshot of alliances used for anything the `alliances` query
+ * doesn't accept a direct server-side filter for. We learned the hard way
+ * that `acronym` is NOT a valid filter argument on this query (confirmed
+ * by a real "Unknown argument \"acronym\"" error from the live API) —
+ * rather than guess at another argument name and risk the same failure,
+ * acronym/partial-name matching and score sorting are done client-side
+ * against this snapshot instead.
+ */
+async function getAllianceIndex() {
+  const cacheKey = 'alliance:index';
+  const cached = cache.get(cacheKey);
+  if (cached !== undefined) return cached;
+
+  const data = await client.query(
+    `query($first: Int) { alliances(first: $first) { data { ${ALLIANCE_FIELDS} } } }`,
+    { first: 500 }
+  );
+  const alliances = data.alliances?.data || [];
+  cache.set(cacheKey, alliances, 3600); // 1 hour — acronym/name mappings rarely change
+  return alliances;
+}
+
 async function getAllianceByName(name) {
   const cacheKey = `alliance:name:${name.toLowerCase()}`;
   const cached = cache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  let data = await client.query(
-    `query($name: [String]) { alliances(name: $name, first: 1) { data { ${ALLIANCE_FIELDS} } } }`,
-    { name: [name] }
-  );
-  let alliance = data.alliances?.data?.[0];
-
-  if (!alliance) {
-    data = await client.query(
-      `query($acr: [String]) { alliances(acronym: $acr, first: 1) { data { ${ALLIANCE_FIELDS} } } }`,
-      { acr: [name] }
+  // Fast path: `name` is a confirmed-valid filter argument.
+  let alliance = null;
+  try {
+    const data = await client.query(
+      `query($name: [String]) { alliances(name: $name, first: 1) { data { ${ALLIANCE_FIELDS} } } }`,
+      { name: [name] }
     );
-    alliance = data.alliances?.data?.[0];
+    alliance = data.alliances?.data?.[0] || null;
+  } catch (err) {
+    console.error('[UNAI] Alliance name-filter query failed, falling back to index search:', err.message);
   }
 
-  cache.set(cacheKey, alliance || null, 600);
-  return alliance || null;
+  // Fall back to acronym / partial-name matching against the cached index.
+  if (!alliance) {
+    const index = await getAllianceIndex();
+    const lower = name.toLowerCase();
+    alliance =
+      index.find(a => (a.acronym || '').toLowerCase() === lower) ||
+      index.find(a => (a.name || '').toLowerCase() === lower) ||
+      index.find(a => (a.name || '').toLowerCase().includes(lower)) ||
+      null;
+  }
+
+  cache.set(cacheKey, alliance, 600);
+  return alliance;
 }
 
 async function getAllianceMembers(allianceId, limit = 100) {
@@ -121,26 +159,15 @@ async function getTopAlliances(limit = 10) {
   const cached = cache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  let alliances;
-  try {
-    const data = await client.query(
-      `query($first: Int) { alliances(first: $first, orderBy: [{column: SCORE, order: DESC}]) { data { ${ALLIANCE_FIELDS} } } }`,
-      { first: limit }
-    );
-    alliances = data.alliances?.data || [];
-  } catch {
-    // orderBy syntax has shifted across P&W API revisions before — if it
-    // errors, fall back to an unsorted larger batch and sort client-side
-    // rather than failing the whole lookup over a sort clause.
-    const data = await client.query(
-      `query($first: Int) { alliances(first: $first) { data { ${ALLIANCE_FIELDS} } } }`,
-      { first: Math.max(limit, 50) }
-    );
-    alliances = (data.alliances?.data || []).sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, limit);
-  }
-
-  cache.set(cacheKey, alliances, 900); // 15 min — rankings don't shift fast
-  return alliances;
+  // Previously tried a server-side `orderBy` argument with a try/catch
+  // fallback — given acronym turned out to be an unverified guess that
+  // failed, orderBy's exact shape is equally unverified, so this sorts
+  // the same cached index client-side instead of risking a second
+  // silent-fallback path.
+  const index = await getAllianceIndex();
+  const sorted = [...index].sort((a, b) => (b.score || 0) - (a.score || 0)).slice(0, limit);
+  cache.set(cacheKey, sorted, 900); // 15 min — rankings don't shift fast
+  return sorted;
 }
 
-module.exports = { getNationById, getNationByName, getAllianceByName, getAllianceMembers, getTopAlliances };
+module.exports = { getNationById, getNationByName, getAllianceByName, getAllianceMembers, getTopAlliances, getAllianceIndex };
