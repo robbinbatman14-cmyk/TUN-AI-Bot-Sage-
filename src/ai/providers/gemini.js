@@ -151,4 +151,44 @@ async function embed(text) {
   return vector;
 }
 
-module.exports = { chat, embed, embedBatch, name: 'gemini' };
+/**
+ * Vision: describes/OCRs a single image. Used for indexing images found
+ * inside uploaded/synced documents (Dynamic Knowledge Sources — image
+ * analysis). Uses the same CHAT_MODEL as chat() since Gemini's Flash-Lite
+ * line is multimodal, so this doesn't cost a separate model's quota.
+ * @param {string} base64Data - raw base64, no data: URL prefix
+ * @param {string} mimeType - e.g. "image/png"
+ * @param {string} prompt
+ * @returns {Promise<string>}
+ */
+async function describeImage(base64Data, mimeType, prompt) {
+  const response = await generateWithRetry({
+    model: CHAT_MODEL,
+    contents: [{
+      role: 'user',
+      parts: [
+        { inlineData: { mimeType, data: base64Data } },
+        { text: prompt }
+      ]
+    }]
+  });
+
+  const text = response.text;
+  if (typeof text !== 'string') {
+    throw new Error('Gemini vision returned an unexpected response shape (no .text field). The image may have been blocked by safety filters.');
+  }
+
+  const usage = response.usageMetadata;
+  if (usage) {
+    usageTracker.logUsage({
+      provider: 'gemini',
+      purpose: 'vision',
+      promptTokens: usage.promptTokenCount || 0,
+      outputTokens: usage.candidatesTokenCount || 0
+    });
+  }
+
+  return text;
+}
+
+module.exports = { chat, embed, embedBatch, describeImage, name: 'gemini' };

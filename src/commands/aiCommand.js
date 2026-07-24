@@ -72,6 +72,9 @@ const data = new SlashCommandBuilder()
   .addSubcommand(sc => sc.setName('lockdown')
     .setDescription('Emergency lockdown: stop all automatic responses immediately, more visible than /ai disable')
     .addBooleanOption(o => o.setName('value').setDescription('Enable lockdown?').setRequired(true)))
+  .addSubcommand(sc => sc.setName('document-images')
+    .setDescription('Toggle whether uploaded/synced documents have embedded images analyzed (uses vision API quota)')
+    .addBooleanOption(o => o.setName('value').setDescription('Analyze embedded images?').setRequired(true)))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
 async function execute(interaction) {
@@ -141,6 +144,7 @@ async function execute(interaction) {
       const c = [
         `**Enabled:** ${configManager.getBool('ai_enabled')}`,
         `**Lockdown:** ${configManager.getBool('lockdown_enabled') ? '🔒 ACTIVE' : 'inactive'}`,
+        `**Document image analysis:** ${configManager.getBool('process_document_images') ? 'enabled' : 'disabled'}`,
         `**Mode:** ${configManager.get('trigger_mode')}`,
         `**Confidence threshold:** ${configManager.get('confidence_threshold')}%`,
         `**Personality:** ${configManager.get('personality')}`,
@@ -211,6 +215,11 @@ async function execute(interaction) {
         return interaction.reply('🔒 **Emergency lockdown ACTIVE.** All automatic responses have stopped immediately. Knowledge base changes are still possible for admins, but the AI will not respond to anyone until lockdown is disabled with `/ai lockdown value:false`.');
       }
       return interaction.reply('🔓 Lockdown lifted. UNAI will resume responding according to its normal configuration (still subject to `/ai enable`/`/ai disable`).');
+    }
+    case 'document-images': {
+      const enable = interaction.options.getBoolean('value');
+      configManager.set('process_document_images', enable);
+      return interaction.reply(`Embedded image analysis for documents: **${enable ? 'enabled' : 'disabled'}**. ${enable ? 'New uploads/updates/syncs will describe and OCR embedded images.' : 'New uploads/updates/syncs will index text only — already-analyzed documents keep their existing image descriptions until next updated.'}`);
     }
   }
 }

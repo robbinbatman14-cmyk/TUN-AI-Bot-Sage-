@@ -56,4 +56,36 @@ async function embed(text) {
   return vector;
 }
 
-module.exports = { chat, embed, embedBatch, name: 'openai' };
+/**
+ * Vision: describes/OCRs a single image. gpt-4o-mini is multimodal, so
+ * this reuses CHAT_MODEL rather than needing a separate vision model.
+ * @param {string} base64Data - raw base64, no data: URL prefix
+ * @param {string} mimeType - e.g. "image/png"
+ * @param {string} prompt
+ * @returns {Promise<string>}
+ */
+async function describeImage(base64Data, mimeType, prompt) {
+  const res = await client.chat.completions.create({
+    model: CHAT_MODEL,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'text', text: prompt },
+        { type: 'image_url', image_url: { url: `data:${mimeType};base64,${base64Data}` } }
+      ]
+    }]
+  });
+
+  if (res.usage) {
+    usageTracker.logUsage({
+      provider: 'openai',
+      purpose: 'vision',
+      promptTokens: res.usage.prompt_tokens || 0,
+      outputTokens: res.usage.completion_tokens || 0
+    });
+  }
+
+  return res.choices[0].message.content;
+}
+
+module.exports = { chat, embed, embedBatch, describeImage, name: 'openai' };

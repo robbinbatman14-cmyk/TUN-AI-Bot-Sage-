@@ -62,4 +62,28 @@ async function embedBatch(texts) {
   return provider.embedBatch(texts);
 }
 
-module.exports = { chat, embed, embedBatch, currentProviderName: () => currentProvider().name, PROVIDERS: Object.keys(PROVIDERS) };
+/**
+ * Vision: describes/OCRs a single image. Unlike embed()/embedBatch(),
+ * no Anthropic-fallback branch is needed — all three providers implement
+ * this natively (Gemini, GPT-4o-mini, and Claude are all multimodal),
+ * so this just routes to whichever provider is currently active.
+ * @param {string} base64Data - raw base64, no data: URL prefix
+ * @param {string} mimeType - e.g. "image/png"
+ * @param {string} prompt
+ * @returns {Promise<string>}
+ */
+async function describeImage(base64Data, mimeType, prompt) {
+  const provider = currentProvider();
+  try {
+    return await provider.describeImage(base64Data, mimeType, prompt);
+  } catch (err) {
+    console.error(`[AI Provider Error] ${provider.name} (vision):`, err.message);
+    throw err;
+  }
+}
+
+module.exports = {
+  chat, embed, embedBatch, describeImage,
+  currentProviderName: () => currentProvider().name,
+  PROVIDERS: Object.keys(PROVIDERS)
+};

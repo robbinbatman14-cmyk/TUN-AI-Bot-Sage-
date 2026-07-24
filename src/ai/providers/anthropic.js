@@ -47,4 +47,38 @@ async function embedBatch() {
   throw new Error('Anthropic does not provide an embeddings API. Embeddings fall back to Gemini/OpenAI — see src/ai/providerManager.js.');
 }
 
-module.exports = { chat, embed, embedBatch, name: 'anthropic' };
+/**
+ * Vision: describes/OCRs a single image. Claude models are natively
+ * multimodal, so this reuses MODEL rather than needing a separate one.
+ * Unlike embeddings, vision has no Anthropic gap — no fallback needed here.
+ * @param {string} base64Data - raw base64, no data: URL prefix
+ * @param {string} mimeType - e.g. "image/png"
+ * @param {string} prompt
+ * @returns {Promise<string>}
+ */
+async function describeImage(base64Data, mimeType, prompt) {
+  const res = await client.messages.create({
+    model: MODEL,
+    max_tokens: 1024,
+    messages: [{
+      role: 'user',
+      content: [
+        { type: 'image', source: { type: 'base64', media_type: mimeType, data: base64Data } },
+        { type: 'text', text: prompt }
+      ]
+    }]
+  });
+
+  if (res.usage) {
+    usageTracker.logUsage({
+      provider: 'anthropic',
+      purpose: 'vision',
+      promptTokens: res.usage.input_tokens || 0,
+      outputTokens: res.usage.output_tokens || 0
+    });
+  }
+
+  return res.content.map(b => (b.type === 'text' ? b.text : '')).join('\n');
+}
+
+module.exports = { chat, embed, embedBatch, describeImage, name: 'anthropic' };

@@ -5,6 +5,7 @@ const { SlashCommandBuilder, PermissionFlagsBits } = require('discord.js');
 const permissionEngine = require('../permissions/permissionEngine');
 const documentManager = require('../knowledge/documentManager');
 const textExtractor = require('../knowledge/textExtractor');
+const imageAnalyzer = require('../knowledge/imageAnalyzer');
 const configManager = require('../config/configManager');
 
 const MUTATING_SUBCOMMANDS = ['upload', 'approve', 'reject', 'archive', 'delete', 'reindex', 'update'];
@@ -74,17 +75,25 @@ async function execute(interaction) {
       return interaction.editReply(`Unsupported file type. Supported: ${textExtractor.SUPPORTED_EXTENSIONS.join(', ')}`);
     }
 
-    let content;
+    let text, images;
     try {
-      content = await textExtractor.extractText(attachment);
+      ({ text, images } = await textExtractor.extractContent(attachment));
     } catch (err) {
       return interaction.editReply(`Couldn't read that file: ${err.message}`);
+    }
+
+    let content = text;
+    if (images.length > 0) {
+      await interaction.editReply(`Extracting text done. Analyzing ${images.length} embedded image(s) — this can take a moment...`);
+      const imageBlocks = await imageAnalyzer.describeImages(images);
+      content = imageAnalyzer.appendImageDescriptions(text, imageBlocks);
     }
 
     const id = documentManager.addDocument({
       title, category, visibility, content, filename: attachment.name, uploadedBy: interaction.user.id
     });
-    return interaction.editReply(`Document uploaded as **pending** (ID ${id}, ${content.length.toLocaleString()} characters extracted). Run \`/knowledge approve id:${id}\` to index it.`);
+    const imageNote = images.length > 0 ? `, ${images.length} image(s) analyzed` : '';
+    return interaction.editReply(`Document uploaded as **pending** (ID ${id}, ${content.length.toLocaleString()} characters extracted${imageNote}). Run \`/knowledge approve id:${id}\` to index it.`);
   }
 
   if (sub === 'approve') {
@@ -128,11 +137,18 @@ async function execute(interaction) {
     if (!textExtractor.isSupported(attachment.name)) {
       return interaction.editReply(`Unsupported file type. Supported: ${textExtractor.SUPPORTED_EXTENSIONS.join(', ')}`);
     }
-    let content;
+    let text, images;
     try {
-      content = await textExtractor.extractText(attachment);
+      ({ text, images } = await textExtractor.extractContent(attachment));
     } catch (err) {
       return interaction.editReply(`Couldn't read that file: ${err.message}`);
+    }
+
+    let content = text;
+    if (images.length > 0) {
+      await interaction.editReply(`Extracting text done. Analyzing ${images.length} embedded image(s) — this can take a moment...`);
+      const imageBlocks = await imageAnalyzer.describeImages(images);
+      content = imageAnalyzer.appendImageDescriptions(text, imageBlocks);
     }
 
     try {
