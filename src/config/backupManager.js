@@ -52,6 +52,9 @@ async function importBackup(backup) {
 
   let documentsRestored = 0, reindexed = 0, reindexFailures = 0;
   const reindexErrors = [];
+  const approvedDocs = (backup.documents || []).filter(d => d.status === 'approved').length;
+  let approvedProcessed = 0;
+
   for (const doc of backup.documents || []) {
     const id = documentManager.addDocument({
       title: doc.title, category: doc.category, visibility: doc.visibility,
@@ -66,6 +69,14 @@ async function importBackup(backup) {
         reindexFailures++;
         console.error(`[UNAI] Backup restore: failed to re-index "${doc.title}" (new id ${id}):`, err.message);
         reindexErrors.push({ title: doc.title, error: err.message });
+      }
+      approvedProcessed++;
+      // Small pacing gap between documents (not after the last one) — each
+      // document can itself take several embedding batches, so back-to-back
+      // large documents risk bursting a per-minute quota even with the
+      // per-batch pacing already inside embedBatch. Cheap insurance.
+      if (approvedProcessed < approvedDocs) {
+        await new Promise(r => setTimeout(r, 1000));
       }
     }
   }
