@@ -31,19 +31,27 @@ const EMBED_MODEL = process.env.GEMINI_EMBEDDING_MODEL || 'gemini-embedding-001'
 
 function extractRetryDelaySeconds(err) {
   const match = /retry in ([\d.]+)s/i.exec(err?.message || '');
-  if (match) return Math.min(Number(match[1]), 30); // cap wait at 30s
+  if (match) return Math.min(Number(match[1]) + 1, 35); // +1s buffer, cap wait at 35s
   return 5;
 }
 
-async function generateWithRetry(params, attempt = 1) {
+/**
+ * Generic retry-with-backoff wrapper for any Gemini SDK call, used for
+ * both chat (generateContent) and embeddings (embedContent) — a real gap
+ * fixed here: embeddings previously had NO retry logic at all, even
+ * though 429s here are exactly as transient/recoverable as chat 429s,
+ * and Google's own error message tells us exactly how long to wait.
+ * @param {() => Promise<any>} fn
+ */
+async function withRetry(fn, attempt = 1) {
   try {
-    return await client.models.generateContent(params);
+    return await fn();
   } catch (err) {
     if (err?.status === 429 && attempt < 3) {
       const waitSeconds = extractRetryDelaySeconds(err);
       console.warn(`[Gemini] Rate limited, retrying in ${waitSeconds}s (attempt ${attempt}/2)...`);
       await new Promise(r => setTimeout(r, waitSeconds * 1000));
-      return generateWithRetry(params, attempt + 1);
+      return withRetry(fn, attempt + 1);
     }
     throw err;
   }
@@ -68,7 +76,7 @@ async function chat(messages, opts = {}) {
 
   let response;
   try {
-    response = await generateWithRetry({ model: CHAT_MODEL, contents, config });
+    response = await withRetry(() => client.models.generateContent({ model: CHAT_MODEL, contents, config }));
   } catch (err) {
     if (err?.status === 404 || /no longer available|not found/i.test(err?.message || '')) {
       throw new Error(
@@ -105,18 +113,20 @@ async function chat(messages, opts = {}) {
   return text;
 }
 
-// Community-reported practical cap on how many texts Gemini's
-// batchEmbedContents endpoint accepts per call; chunked conservatively
-// under that so a very large document still works, just in more than
-// one request rather than one-per-chunk.
-const EMBED_BATCH_SIZE = 100;
+// Kept intentionally modest (well under the community-reported ~150-item
+// practical cap): a real production error showed a free-tier embedding
+// quota metric named "EmbedContentRequestsPerMinute...FreeTier" with a
+// limit of 100 — since we can't be certain whether that quota counts per
+// HTTP call or per text item inside a batch, staying well under 100
+// items per call is cheap insurance either way, combined with the retry
+// logic below for whichever case turns out to be true.
+const EMBED_BATCH_SIZE = 40;
 
 /**
- * Embeds many texts in as few API requests as possible. This is the
- * main lever for free-tier embedding quota: Gemini's embedContent
- * endpoint accepts an array and returns one embedding per input while
- * only counting as ONE request against the daily quota — so indexing
- * a 20-chunk document costs 1 request here instead of 20.
+ * Embeds many texts in as few API requests as possible, with automatic
+ * retry-with-backoff on rate-limit errors (see withRetry) and a short
+ * pacing delay between batches so a large multi-batch document doesn't
+ * burst several requests in the same instant.
  * @param {string[]} texts
  * @returns {Promise<number[][]>} one embedding vector per input, same order
  */
@@ -126,7 +136,20 @@ async function embedBatch(texts) {
   const allValues = [];
   for (let i = 0; i < texts.length; i += EMBED_BATCH_SIZE) {
     const batch = texts.slice(i, i + EMBED_BATCH_SIZE);
-    const response = await client.models.embedContent({ model: EMBED_MODEL, contents: batch });
+
+    let response;
+    try {
+      response = await withRetry(() => client.models.embedContent({ model: EMBED_MODEL, contents: batch }));
+    } catch (err) {
+      if (err?.status === 429) {
+        throw new Error(
+          `Gemini embedding quota exceeded even after retrying (${err.message}). ` +
+          `This is usually the per-minute embedding quota, which resets quickly — waiting a minute and retrying (e.g. /knowledge reindex) often just works. ` +
+          `If it keeps happening, enable billing on the same Google AI Studio project for higher limits.`
+        );
+      }
+      throw err;
+    }
 
     const values = response.embeddings?.map(e => e.values);
     if (!values || values.length !== batch.length) {
@@ -141,6 +164,12 @@ async function embedBatch(texts) {
         promptTokens: response.usageMetadata.promptTokenCount || 0,
         outputTokens: 0
       });
+    }
+
+    // Small pacing gap between batches (not after the last one) so a
+    // large document's several batches don't all fire in the same instant.
+    if (i + EMBED_BATCH_SIZE < texts.length) {
+      await new Promise(r => setTimeout(r, 500));
     }
   }
   return allValues;
@@ -162,7 +191,7 @@ async function embed(text) {
  * @returns {Promise<string>}
  */
 async function describeImage(base64Data, mimeType, prompt) {
-  const response = await generateWithRetry({
+  const response = await withRetry(() => client.models.generateContent({
     model: CHAT_MODEL,
     contents: [{
       role: 'user',
@@ -171,7 +200,7 @@ async function describeImage(base64Data, mimeType, prompt) {
         { text: prompt }
       ]
     }]
-  });
+  }));
 
   const text = response.text;
   if (typeof text !== 'string') {
