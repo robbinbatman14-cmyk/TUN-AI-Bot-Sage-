@@ -8,13 +8,20 @@ const textExtractor = require('../knowledge/textExtractor');
 const imageAnalyzer = require('../knowledge/imageAnalyzer');
 const configManager = require('../config/configManager');
 
-const MUTATING_SUBCOMMANDS = ['upload', 'approve', 'reject', 'archive', 'delete', 'reindex', 'update'];
+const MUTATING_SUBCOMMANDS = ['upload', 'approve', 'reject', 'archive', 'delete', 'reindex', 'update', 'set-priority'];
 
 function requireAdmin(interaction) {
   return permissionEngine.requireAdmin(interaction);
 }
 
 const category = 'Knowledge Base';
+
+const PRIORITY_CHOICES = [
+  { name: '1 — Doctrine / Constitution / Official Policy (highest authority)', value: 1 },
+  { name: '2 — Internal Guides & Handbooks (default)', value: 2 },
+  { name: '3 — Official Politics & War Documentation', value: 3 },
+  { name: '4 — Community / External Guides (lowest authority)', value: 4 }
+];
 
 const data = new SlashCommandBuilder()
   .setName('knowledge')
@@ -24,6 +31,8 @@ const data = new SlashCommandBuilder()
     .addAttachmentOption(o => o.setName('file').setDescription('Text, Markdown, PDF, or Word file').setRequired(true))
     .addStringOption(o => o.setName('title').setDescription('Document title').setRequired(true))
     .addStringOption(o => o.setName('category').setDescription('Category, e.g. constitution, military, economy').setRequired(true))
+    .addIntegerOption(o => o.setName('priority').setDescription('Source authority tier (default: 2 — Internal Guides)').setRequired(false)
+      .addChoices(...PRIORITY_CHOICES))
     .addStringOption(o => o.setName('visibility').setDescription('Who can see this').setRequired(false)
       .addChoices(
         { name: 'Public', value: 'public' }, { name: 'Members Only (default)', value: 'members_only' },
@@ -45,6 +54,10 @@ const data = new SlashCommandBuilder()
     .addAttachmentOption(o => o.setName('file').setDescription('Replacement file (.txt, .md, .pdf, or .docx)').setRequired(true)))
   .addSubcommand(sc => sc.setName('versions').setDescription('Show version history for a document')
     .addIntegerOption(o => o.setName('id').setDescription('Document ID').setRequired(true)))
+  .addSubcommand(sc => sc.setName('set-priority').setDescription('Change a document\'s source authority tier')
+    .addIntegerOption(o => o.setName('id').setDescription('Document ID').setRequired(true))
+    .addIntegerOption(o => o.setName('priority').setDescription('New priority tier').setRequired(true)
+      .addChoices(...PRIORITY_CHOICES)))
   .addSubcommand(sc => sc.setName('list').setDescription('List documents')
     .addStringOption(o => o.setName('status').setDescription('Filter by status').setRequired(false)
       .addChoices(
@@ -69,6 +82,7 @@ async function execute(interaction) {
     const attachment = interaction.options.getAttachment('file');
     const title = interaction.options.getString('title');
     const category = interaction.options.getString('category').toLowerCase();
+    const priority = interaction.options.getInteger('priority') || 2;
     const visibility = interaction.options.getString('visibility') || 'members_only';
 
     if (!textExtractor.isSupported(attachment.name)) {
@@ -90,10 +104,10 @@ async function execute(interaction) {
     }
 
     const id = documentManager.addDocument({
-      title, category, visibility, content, filename: attachment.name, uploadedBy: interaction.user.id
+      title, category, visibility, priority, content, filename: attachment.name, uploadedBy: interaction.user.id
     });
     const imageNote = images.length > 0 ? `, ${images.length} image(s) analyzed` : '';
-    return interaction.editReply(`Document uploaded as **pending** (ID ${id}, ${content.length.toLocaleString()} characters extracted${imageNote}). Run \`/knowledge approve id:${id}\` to index it.`);
+    return interaction.editReply(`Document uploaded as **pending** (ID ${id}, priority ${priority}: ${documentManager.PRIORITY_LABELS[priority]}, ${content.length.toLocaleString()} characters extracted${imageNote}). Run \`/knowledge approve id:${id}\` to index it.`);
   }
 
   if (sub === 'approve') {
@@ -180,11 +194,20 @@ async function execute(interaction) {
     return interaction.reply({ content: lines.join('\n'), ephemeral: true });
   }
 
+  if (sub === 'set-priority') {
+    const id = interaction.options.getInteger('id');
+    const priority = interaction.options.getInteger('priority');
+    const doc = documentManager.getDocument(id);
+    if (!doc) return interaction.reply({ content: `No document with ID ${id}.`, ephemeral: true });
+    documentManager.setPriority(id, priority);
+    return interaction.reply({ content: `Document ${id} ("${doc.title}") priority set to **${priority} — ${documentManager.PRIORITY_LABELS[priority]}**.`, ephemeral: true });
+  }
+
   if (sub === 'list') {
     const status = interaction.options.getString('status');
     const docs = documentManager.listDocuments(status);
     if (docs.length === 0) return interaction.reply({ content: '*No documents found.*', ephemeral: true });
-    const text = docs.slice(0, 25).map(d => `**#${d.id}** ${d.title} — ${d.category} — ${d.visibility} — *${d.status}*`).join('\n');
+    const text = docs.slice(0, 25).map(d => `**#${d.id}** ${d.title} — ${d.category} — P${d.priority} — ${d.visibility} — *${d.status}*`).join('\n');
     return interaction.reply({ content: text, ephemeral: true });
   }
 }

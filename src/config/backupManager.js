@@ -21,7 +21,7 @@ function exportBackup() {
     topics: db.prepare('SELECT name, enabled FROM topics').all(),
     rolePermissions: db.prepare('SELECT role_id, level FROM role_permissions').all(),
     faq: db.prepare('SELECT question, answer, category, keywords, priority FROM faq').all(),
-    documents: db.prepare('SELECT title, category, visibility, status, version, content FROM documents').all()
+    documents: db.prepare('SELECT title, category, visibility, priority, status, version, content FROM documents').all()
   };
 }
 
@@ -57,7 +57,7 @@ async function importBackup(backup) {
 
   for (const doc of backup.documents || []) {
     const id = documentManager.addDocument({
-      title: doc.title, category: doc.category, visibility: doc.visibility,
+      title: doc.title, category: doc.category, visibility: doc.visibility, priority: doc.priority,
       content: doc.content, filename: null, uploadedBy: 'backup-import'
     });
     documentsRestored++;

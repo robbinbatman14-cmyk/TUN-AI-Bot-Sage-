@@ -18,6 +18,13 @@ const data = new SlashCommandBuilder()
     .addStringOption(o => o.setName('link').setDescription('Google Doc URL').setRequired(true))
     .addStringOption(o => o.setName('title').setDescription('Document title').setRequired(true))
     .addStringOption(o => o.setName('category').setDescription('Category, e.g. constitution, military').setRequired(true))
+    .addIntegerOption(o => o.setName('priority').setDescription('Source authority tier (default: 2 — Internal Guides)').setRequired(false)
+      .addChoices(
+        { name: '1 — Doctrine / Constitution / Official Policy (highest authority)', value: 1 },
+        { name: '2 — Internal Guides & Handbooks (default)', value: 2 },
+        { name: '3 — Official Politics & War Documentation', value: 3 },
+        { name: '4 — Community / External Guides (lowest authority)', value: 4 }
+      ))
     .addStringOption(o => o.setName('visibility').setDescription('Who can see this').setRequired(false)
       .addChoices(
         { name: 'Public', value: 'public' }, { name: 'Members Only (default)', value: 'members_only' },
@@ -50,11 +57,12 @@ async function execute(interaction) {
     const link = interaction.options.getString('link');
     const title = interaction.options.getString('title');
     const docCategory = interaction.options.getString('category').toLowerCase();
+    const priority = interaction.options.getInteger('priority') || 2;
     const visibility = interaction.options.getString('visibility') || 'members_only';
 
     try {
       const result = await sourceManager.addGoogleDocSource({
-        url: link, title, category: docCategory, visibility, addedBy: interaction.user.id
+        url: link, title, category: docCategory, visibility, priority, addedBy: interaction.user.id
       });
       return interaction.editReply(
         `Google Doc linked as source **#${result.sourceId}** → document **#${result.documentId}** (pending). ` +

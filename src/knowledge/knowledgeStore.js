@@ -69,12 +69,29 @@ async function indexDocument(documentId) {
   return pieces.length;
 }
 
+// Priority boost applied to cosine similarity for ranking purposes only
+// (never mutates the actual similarity score). This is a deliberate
+// deviation from strict "sort by priority, then relevance": a pure
+// priority-first sort would let a Priority-1 document with near-zero
+// topical relevance crowd out a highly relevant Priority-3/4 chunk out
+// of the results entirely, which would make retrieval quality worse for
+// unrelated questions. A weighted boost instead means that AMONG
+// comparably relevant chunks, higher authority wins — which is what
+// actually matters for conflict resolution — while a chunk still has to
+// clear a relevance bar to be retrieved at all. The real conflict-
+// resolution instruction (doctrine overrides general advice when both
+// are present) lives in answerEngine.js's system prompt, not here —
+// ranking just improves the odds that doctrine actually makes it into
+// context in the first place.
+const PRIORITY_BOOST = { 1: 0.15, 2: 0.10, 3: 0.05, 4: 0 };
+
 /**
  * Semantic search across APPROVED documents the given permission
  * level is allowed to see. Returns top-K chunks with document
- * metadata, ranked by similarity.
+ * metadata, ranked by similarity with a source-authority boost
+ * (see PRIORITY_BOOST above).
  */
-async function search(query, { level, topK = 5 } = {}) {
+async function search(query, { level, topK = 6 } = {}) {
   const permissions = require('../permissions/permissionEngine');
 
   const cacheKey = query.trim().toLowerCase();
@@ -87,7 +104,7 @@ async function search(query, { level, topK = 5 } = {}) {
   const rows = db.prepare(`
     SELECT chunks.id as chunk_id, chunks.content, chunks.embedding,
            documents.id as document_id, documents.title, documents.category,
-           documents.visibility, documents.version
+           documents.visibility, documents.version, documents.priority
     FROM chunks
     JOIN documents ON documents.id = chunks.document_id
     WHERE documents.status = 'approved'
@@ -95,14 +112,15 @@ async function search(query, { level, topK = 5 } = {}) {
 
   const scored = rows
     .filter(r => permissions.canAccessVisibility(level, r.visibility))
-    .map(r => ({
-      ...r,
-      score: cosineSimilarity(queryEmbedding, JSON.parse(r.embedding))
-    }))
-    .sort((a, b) => b.score - a.score)
+    .map(r => {
+      const score = cosineSimilarity(queryEmbedding, JSON.parse(r.embedding));
+      const rank = score + (PRIORITY_BOOST[r.priority] || 0);
+      return { ...r, score, rank };
+    })
+    .sort((a, b) => b.rank - a.rank)
     .slice(0, topK);
 
-  return scored.map(({ embedding, ...rest }) => rest); // don't leak raw vectors upward
+  return scored.map(({ embedding, rank, ...rest }) => rest); // don't leak raw vectors/internal rank upward
 }
 
 module.exports = { indexDocument, search, chunkText, queryEmbeddingCache };

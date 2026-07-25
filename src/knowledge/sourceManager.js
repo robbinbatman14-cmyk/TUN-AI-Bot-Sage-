@@ -35,12 +35,12 @@ async function fetchAndBuildContent(source) {
   return { rawHash, content, imageCount: images.length };
 }
 
-async function addGoogleDocSource({ url, title, category, visibility, addedBy }) {
+async function addGoogleDocSource({ url, title, category, visibility, priority = 2, addedBy }) {
   const docId = googleDocsSource.extractGoogleDocId(url);
   const { rawHash, content } = await fetchAndBuildContent({ type: 'google_doc', external_id: docId });
 
   const documentId = documentManager.addDocument({
-    title, category, visibility, content, filename: `google-doc-${docId}.docx`, uploadedBy: addedBy
+    title, category, visibility, priority, content, filename: `google-doc-${docId}.docx`, uploadedBy: addedBy
   });
 
   const result = db.prepare(`

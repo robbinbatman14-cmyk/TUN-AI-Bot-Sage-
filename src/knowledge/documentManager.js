@@ -6,12 +6,29 @@
 const db = require('../config/db');
 const knowledgeStore = require('./knowledgeStore');
 
-function addDocument({ title, category, visibility = 'members_only', content, filename, uploadedBy }) {
+const PRIORITY_LABELS = {
+  1: 'Doctrine/Constitution/Official Policy',
+  2: 'Internal Guides & Handbooks',
+  3: 'Official Politics & War Documentation',
+  4: 'Community/External Guides'
+};
+
+function addDocument({ title, category, visibility = 'members_only', priority = 2, content, filename, uploadedBy }) {
   const result = db.prepare(`
-    INSERT INTO documents (title, category, visibility, status, content, filename, uploaded_by)
-    VALUES (?, ?, ?, 'pending', ?, ?, ?)
-  `).run(title, category, visibility, content, filename || null, uploadedBy);
+    INSERT INTO documents (title, category, visibility, priority, status, content, filename, uploaded_by)
+    VALUES (?, ?, ?, ?, 'pending', ?, ?, ?)
+  `).run(title, category, visibility, clampPriority(priority), content, filename || null, uploadedBy);
   return result.lastInsertRowid;
+}
+
+function clampPriority(priority) {
+  const n = Number(priority);
+  if (!Number.isInteger(n) || n < 1 || n > 4) return 2; // fall back to the safe middle default
+  return n;
+}
+
+function setPriority(id, priority) {
+  db.prepare('UPDATE documents SET priority = ? WHERE id = ?').run(clampPriority(priority), id);
 }
 
 async function approveDocument(id) {
@@ -35,9 +52,9 @@ function deleteDocument(id) {
 
 function listDocuments(status = null) {
   if (status) {
-    return db.prepare('SELECT id, title, category, visibility, status, version, created_at FROM documents WHERE status = ? ORDER BY id DESC').all(status);
+    return db.prepare('SELECT id, title, category, visibility, priority, status, version, created_at FROM documents WHERE status = ? ORDER BY priority ASC, id DESC').all(status);
   }
-  return db.prepare('SELECT id, title, category, visibility, status, version, created_at FROM documents ORDER BY id DESC').all();
+  return db.prepare('SELECT id, title, category, visibility, priority, status, version, created_at FROM documents ORDER BY priority ASC, id DESC').all();
 }
 
 function getDocument(id) {
@@ -85,5 +102,5 @@ function getVersionHistory(id) {
 module.exports = {
   addDocument, approveDocument, rejectDocument, archiveDocument,
   deleteDocument, listDocuments, getDocument, reindexDocument,
-  updateDocumentContent, getVersionHistory
+  updateDocumentContent, getVersionHistory, setPriority, PRIORITY_LABELS
 };

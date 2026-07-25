@@ -44,6 +44,7 @@ CREATE TABLE IF NOT EXISTS documents (
   category TEXT NOT NULL,
   visibility TEXT NOT NULL DEFAULT 'members_only', -- public | members_only | government | ministry | owner
   status TEXT NOT NULL DEFAULT 'pending', -- pending | approved | rejected | archived
+  priority INTEGER NOT NULL DEFAULT 2, -- 1=Doctrine/Constitution/policy, 2=Internal guides, 3=Official P&W docs, 4=Community/external
   version TEXT DEFAULT '1.0',
   filename TEXT,
   content TEXT,
@@ -169,5 +170,12 @@ function addColumnIfMissing(table, columnDef) {
   }
 }
 addColumnIfMissing('logs', 'topic TEXT');
+// 1 = Doctrine/Constitution/official policy & resolutions (highest authority)
+// 2 = Internal guides and handbooks
+// 3 = Official Politics & War documentation
+// 4 = Community guides and other external sources (lowest stored-document authority)
+// (Priority 5, "general AI knowledge", is never a stored document — it's
+// the model's own training knowledge, implicitly the lowest authority.)
+addColumnIfMissing('documents', 'priority INTEGER NOT NULL DEFAULT 2');
 
 module.exports = db;

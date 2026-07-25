@@ -23,6 +23,7 @@ const knowledgeStore = require('../knowledge/knowledgeStore');
 const faqManager = require('../knowledge/faqManager');
 const configManager = require('../config/configManager');
 const liveDataFetcher = require('../integrations/liveDataFetcher');
+const { PRIORITY_LABELS } = require('../knowledge/documentManager');
 
 const PERSONALITIES = {
   professional: 'Respond in a concise, formal, direct tone.',
@@ -43,6 +44,7 @@ Core principles you must always follow:
   - general_knowledge: this is not asking what TUN specifically decided — it's asking about Politics & War mechanics, strategy, math, comparisons, or teaching. You may use your own knowledge and reasoning freely here, even with no retrieved context at all. Being conservative here means being honest about your own uncertainty, not refusing to help.
   - mixed: combine both — stay strictly grounded for the alliance-specific part (e.g. TUN's actual audit standards), and reason freely for the general part (e.g. why a specific stat might be causing a failure). Don't let uncertainty on one part block you from being helpful on the other; just be clear about which is which.
 - You may reason across and combine multiple retrieved pieces to answer a question, even if no single piece states the answer directly — e.g. if one document says the Secretary-General appoints ministers and another says ministers oversee their ministries, you can correctly conclude who ultimately manages the ministries. This is synthesis, not guessing, as long as the logical steps are actually supported by what's retrieved.
+- SOURCE AUTHORITY: retrieved TUN documents are labeled with a priority tier — "Doctrine/Constitution/Official Policy" (highest), "Internal Guides & Handbooks", "Official Politics & War Documentation", or "Community/External Guides" (lowest stored-document tier). Your own general knowledge (used for general_knowledge/mixed reasoning) is always the LOWEST authority of all, below even a Community/External Guide. When sources genuinely conflict — most commonly, when general Politics & War strategy differs from what TUN's own doctrine says — the higher-authority TUN source wins for what you actually recommend to the member. You may still mention the general/external perspective for context ("general P&W strategy often suggests X"), but must clearly and explicitly state that TUN doctrine overrides it and say what TUN's actual position is instead. Never let a lower-authority source quietly win a conflict by being more detailed or more confidently worded — authority tier decides it, not tone.
 - Follow the conversation naturally: recent context (including your own prior replies) may resolve pronouns and follow-ups like "his", "it", "why", "how many does it have" — read it and answer the actual implied question rather than treating every message as isolated.
 - You may perform calculations (infrastructure costs, revenue estimates, resource conversions, military purchasing, loan math, warchest planning) using your own arithmetic. Show your work briefly so it can be checked, and note that important financial decisions are worth double-checking rather than treating a single generated number as guaranteed exact.
 - For strategic questions ("should I build another city", "which project next", "is this a good raid target"), reason through it and explain your recommendation — you're not making the decision for them, you're helping them think it through. Per Section 101, clearly distinguish in your wording between stating a fact, offering a recommendation/opinion, and citing official policy — don't let a personal-strategy opinion read as if it were TUN policy.
@@ -87,14 +89,14 @@ async function answer(question, level, contextText = '', classification = null) 
   // embedding call no matter its type.
   const chunks = questionType === 'general_knowledge'
     ? []
-    : await knowledgeStore.search(question, { level, topK: 5 });
+    : await knowledgeStore.search(question, { level, topK: 6 });
 
   const liveData = await liveDataFetcher.fetchRelevantLiveData(classification, question);
 
   const contextBlocks = [
     ...(liveData ? [liveData] : []),
     ...faqHits.map(f => `[FAQ: ${f.question}]\n${f.answer}`),
-    ...chunks.map(c => `[Document: ${c.title} (${c.category}, v${c.version})]\n${c.content}`)
+    ...chunks.map(c => `[Document: ${c.title} (${c.category}, v${c.version}) — Priority ${c.priority}: ${PRIORITY_LABELS[c.priority] || 'Unspecified'}]\n${c.content}`)
   ];
 
   const retrievedContext = contextBlocks.length > 0
