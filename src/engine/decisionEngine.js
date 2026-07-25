@@ -5,6 +5,10 @@
 // detection -> topic classification -> retrieval -> confidence
 // -> human-override check -> cooldown -> respond.
 // Failure at any stage means SILENCE, per Section 3.3.
+//
+// Extended with: a zero-cost greeting fast-path, a short "active
+// conversation" window so a member doesn't need to re-tag every
+// message, and multi-question splitting for numbered/bulleted lists.
 // ============================================================
 const configManager = require('../config/configManager');
 const permissionEngine = require('../permissions/permissionEngine');
@@ -13,6 +17,9 @@ const classifier = require('./classifier');
 const answerEngine = require('./answerEngine');
 const logger = require('../logging/logger');
 const security = require('../security/securityMonitor');
+const greetingDetector = require('./greetingDetector');
+const activeConversation = require('./activeConversation');
+const questionSplitter = require('./questionSplitter');
 
 // Short-lived per-channel memory (Section 20). Expires after 10 minutes.
 // Includes UNAI's own replies, not just human messages — this is what
@@ -33,6 +40,101 @@ function getContextText(channelId) {
   const now = Date.now();
   const list = (channelContext.get(channelId) || []).filter(m => now - m.ts < CONTEXT_TTL_MS);
   return list.map(m => `${m.author}: ${m.content}`).join('\n');
+}
+
+/**
+ * Turns a raw answerEngine result into final display text, applying the
+ * confidence-threshold deferral / citation / disclaimer logic. Shared by
+ * both the single-question flow and each item in a multi-question batch,
+ * so that logic only lives in one place.
+ * @returns {{rendered: boolean, text: string|null, escalate: boolean}}
+ *   rendered=false means the model declined outright (Section 3.3) — the
+ *   single-question flow turns this into silence; the multi-question flow
+ *   shows a brief "couldn't answer this one" line instead, since silently
+ *   dropping one item from a numbered batch would be confusing.
+ */
+function formatAnswerResult(classification, result, threshold) {
+  const questionType = classification.question_type || 'alliance_specific';
+
+  if (!result.should_respond || !result.answer) {
+    return { rendered: false, text: null, escalate: false };
+  }
+
+  if (result.confidence < threshold) {
+    // Below threshold: defer rather than guess (Section 17). What "defer"
+    // means depends on question type — an alliance-specific gap genuinely
+    // needs a government member; a general-knowledge gap is just the model
+    // being unsure about game trivia, which pinging government won't fix.
+    const isGeneralKnowledge = questionType === 'general_knowledge';
+    const text = isGeneralKnowledge
+      ? `I'm not fully confident about this one (${result.confidence}%) — worth double-checking against the P&W wiki or another player rather than taking my word for it.`
+      : `I'm not confident enough in an answer to this (${result.confidence}%, below the ${threshold}% threshold). A government member should weigh in — I've flagged this for them.`;
+    return { rendered: true, text, escalate: !isGeneralKnowledge };
+  }
+
+  const citationsMode = configManager.get('citations_mode');
+  let text = result.answer;
+  if (citationsMode === 'always' && result.sources?.length) {
+    text += `\n\n*Source: ${result.sources.join('; ')}*`;
+  }
+  // Only nudge toward a government member for alliance-specific/mixed
+  // answers below full confidence — for a pure general-knowledge or math
+  // answer, "a government member can clarify" doesn't mean anything.
+  if (result.confidence < 95 && questionType !== 'general_knowledge') {
+    text += `\n\n*(A government member can clarify further if needed.)*`;
+  }
+  return { rendered: true, text, escalate: !!result.should_escalate };
+}
+
+/**
+ * Answers 2-10 independently-detected questions from one message, each
+ * with its own classification, retrieval, and reasoning — not one muddled
+ * answer to the whole message. Every item gets logged individually (same
+ * as a normal single question) so /review and /ai analytics see them the
+ * same way as any other answered question.
+ */
+async function processMultipleQuestions(message, questions, level, contextText) {
+  const threshold = configManager.getNumber('confidence_threshold');
+  const parts = [];
+  let anyEscalate = false;
+
+  for (const q of questions) {
+    const startTime = Date.now();
+    let classification = null, result = null, text;
+
+    try {
+      classification = await classifier.classify(q, contextText);
+      if (!classification.is_question) {
+        text = "This doesn't look like something I can help with.";
+      } else {
+        result = await answerEngine.answer(q, level, contextText, classification);
+        const formatted = formatAnswerResult(classification, result, threshold);
+        text = formatted.rendered ? formatted.text : "I don't have enough grounded information to answer this one confidently.";
+        if (formatted.escalate) anyEscalate = true;
+      }
+    } catch (err) {
+      console.error('[UNAI] Error answering a sub-question:', err.message);
+      text = `Ran into an error answering this one: ${err.message}`;
+    }
+
+    logger.logInteraction({
+      userId: message.author.id,
+      channelId: message.channel.id,
+      message: q,
+      response: text,
+      confidence: result?.confidence ?? null,
+      documentsUsed: result?.documentsConsulted || [],
+      escalated: false,
+      responseTimeMs: Date.now() - startTime,
+      topic: classification?.topic
+    });
+
+    parts.push({ question: q, text });
+  }
+
+  const combinedText = parts.map((p, i) => `**${i + 1}. ${p.question}**\n${p.text}`).join('\n\n');
+  pushContext(message.channel.id, 'UNAI', combinedText);
+  return { action: 'respond', payload: { text: combinedText, escalate: anyEscalate, multi: true } };
 }
 
 /**
@@ -58,6 +160,13 @@ async function process(message, { wasMentioned, guildMember }) {
     return { action: 'silent', reason: 'lockdown_active' };
   }
 
+  // A member who tagged the bot recently (or just did) is treated as
+  // "effectively mentioned" for gating purposes — this is what lets a
+  // follow-up work without re-tagging. Deliberately per (channel, user),
+  // never per-channel, so this can't pull an unrelated member into the
+  // pipeline just because someone else nearby was talking to the bot.
+  const effectivelyMentioned = wasMentioned || activeConversation.isActive(message.channel.id, message.author.id);
+
   // Stage: security guard (Sections 88-89, 94) — cheap, deterministic,
   // runs before any AI call so an injection attempt never even reaches
   // the model, and a spam burst never costs API quota.
@@ -67,10 +176,7 @@ async function process(message, { wasMentioned, guildMember }) {
       channelId: message.channel.id,
       detail: message.content.slice(0, 300)
     });
-    if (!wasMentioned) return { action: 'silent', reason: 'security_injection_attempt' };
-    // If directly mentioned, respond with a flat, neutral deflection rather
-    // than silently ignoring a government member who might legitimately be
-    // testing the bot — but never engage the model with it.
+    if (!effectivelyMentioned) return { action: 'silent', reason: 'security_injection_attempt' };
     return {
       action: 'respond',
       payload: { text: "I can't override my configuration or instructions this way. Happy to help with a real Politics & War or Union of Nations question." }
@@ -87,25 +193,62 @@ async function process(message, { wasMentioned, guildMember }) {
 
   // Stage: trigger mode
   const mode = configManager.get('trigger_mode');
-  if (mode === 'tagged' && !wasMentioned) {
+  if (mode === 'tagged' && !effectivelyMentioned) {
     return { action: 'silent', reason: 'not_mentioned_tagged_mode' };
   }
-  if (mode === 'hybrid' && !wasMentioned) {
-    // still eligible, smart detection below will decide
-  }
-  if (mode === 'smart' && wasMentioned) {
-    // smart mode still runs full detection even when mentioned;
-    // this keeps behavior predictable and spec-consistent.
-  }
 
-  // Stage: channel allowed? Direct mentions bypass the channel
-  // allowlist so a member can always ask directly, anywhere.
+  // Stage: channel allowed? Direct mentions (and active-conversation
+  // follow-ups) bypass the channel allowlist so a member can always ask
+  // directly, anywhere, and continue that same conversation anywhere.
   const channelAllowed = configManager.isChannelAllowed(message.channel.id);
-  if (!wasMentioned && !channelAllowed) {
+  if (!effectivelyMentioned && !channelAllowed) {
     return { action: 'silent', reason: 'channel_not_allowed' };
   }
 
+  // Stage: cooldown (moved ahead of classification so a cooldown-blocked
+  // message never spends an API call getting classified first)
+  const cooldownCheck = cooldown.canRespond(message.author.id, message.channel.id);
+  if (!cooldownCheck.allowed && !effectivelyMentioned) {
+    return { action: 'silent', reason: cooldownCheck.reason };
+  }
+
+  // Stage: greeting fast-path. Only for an ACTUAL fresh @mention (not
+  // merely an active-conversation carry-over) — "@SAGE hello" gets a
+  // free, instant, zero-API-cost reply. This also starts (or refreshes)
+  // the active-conversation window, which is what lets the very next
+  // message in the example work without re-tagging.
+  if (wasMentioned && greetingDetector.isPureGreeting(message.content)) {
+    const text = greetingDetector.greetingResponse(configManager.get('personality'));
+    cooldown.recordResponse(message.author.id, message.channel.id);
+    activeConversation.markActive(message.channel.id, message.author.id);
+    pushContext(message.channel.id, 'UNAI', text);
+    return { action: 'respond', payload: { text, escalate: false } };
+  }
+
   const contextText = getContextText(message.channel.id);
+  const level = permissionEngine.getMemberLevel(guildMember);
+
+  // Stage: multi-question detection. Only engages when the bot was
+  // actually addressed (mentioned or mid active-conversation) — an
+  // unaddressed multi-line message in a passively-monitored channel still
+  // goes through the normal single-classification on/off-topic gate below,
+  // rather than risking the bot bulk-answering an unrelated numbered list.
+  if (effectivelyMentioned) {
+    const detected = questionSplitter.detectQuestions(message.content);
+    if (detected.length > questionSplitter.MAX_QUESTIONS) {
+      cooldown.recordResponse(message.author.id, message.channel.id);
+      return {
+        action: 'respond',
+        payload: { text: `That's ${detected.length} questions at once — I can handle up to ${questionSplitter.MAX_QUESTIONS} in one message. Could you split it into a couple of smaller batches?` }
+      };
+    }
+    if (detected.length >= questionSplitter.MIN_QUESTIONS) {
+      cooldown.recordResponse(message.author.id, message.channel.id);
+      const multiResult = await processMultipleQuestions(message, detected, level, contextText);
+      activeConversation.markActive(message.channel.id, message.author.id);
+      return multiResult;
+    }
+  }
 
   // Stage: question detection + topic classification (skipped only
   // when directly mentioned AND trigger mode is tagged-only, since
@@ -122,22 +265,12 @@ async function process(message, { wasMentioned, guildMember }) {
     return { action: 'silent', reason: 'off_topic' };
   }
 
-  // Stage: cooldown
-  const cooldownCheck = cooldown.canRespond(message.author.id, message.channel.id);
-  if (!cooldownCheck.allowed && !wasMentioned) {
-    return { action: 'silent', reason: cooldownCheck.reason };
-  }
-
-  // Stage: permission level (used for both retrieval scoping and to
-  // gate escalation targets later)
-  const level = permissionEngine.getMemberLevel(guildMember);
-
   // Stage: retrieval + grounded generation + confidence
   const result = await answerEngine.answer(message.content, level, contextText, classification);
-
   const threshold = configManager.getNumber('confidence_threshold');
+  const formatted = formatAnswerResult(classification, result, threshold);
 
-  if (!result.should_respond || !result.answer) {
+  if (!formatted.rendered) {
     logger.logInteraction({
       userId: message.author.id,
       channelId: message.channel.id,
@@ -152,68 +285,24 @@ async function process(message, { wasMentioned, guildMember }) {
     return { action: 'silent', reason: 'model_declined' };
   }
 
-  if (result.confidence < threshold) {
-    // Below threshold: defer rather than guess (Section 17). What "defer"
-    // means depends on question type — an alliance-specific gap genuinely
-    // needs a government member; a general-knowledge gap is just the model
-    // being unsure about game trivia, which pinging government won't fix.
-    const isGeneralKnowledge = classification.question_type === 'general_knowledge';
-    const payload = isGeneralKnowledge
-      ? {
-          text: `I'm not fully confident about this one (${result.confidence}%) — worth double-checking against the P&W wiki or another player rather than taking my word for it.`,
-          escalate: false
-        }
-      : {
-          text: `I'm not confident enough in an answer to this (${result.confidence}%, below the ${threshold}% threshold). A government member should weigh in — I've flagged this for them.`,
-          escalate: true
-        };
-    logger.logInteraction({
-      userId: message.author.id,
-      channelId: message.channel.id,
-      message: message.content,
-      response: payload.text,
-      confidence: result.confidence,
-      documentsUsed: result.documentsConsulted,
-      escalated: payload.escalate,
-      responseTimeMs: Date.now() - startTime,
-      topic: classification.topic
-    });
-    cooldown.recordResponse(message.author.id, message.channel.id);
-    pushContext(message.channel.id, 'UNAI', payload.text);
-    return { action: 'respond', payload };
-  }
-
-  // Confident enough to answer normally.
-  const citationsMode = configManager.get('citations_mode');
-  let text = result.answer;
-  if (citationsMode === 'always' && result.sources?.length) {
-    text += `\n\n*Source: ${result.sources.join('; ')}*`;
-  }
-  // Only nudge toward a government member for alliance-specific/mixed
-  // answers below full confidence — for a pure general-knowledge or math
-  // answer, "a government member can clarify" doesn't mean anything.
-  const questionType = classification.question_type || 'alliance_specific';
-  if (result.confidence < 95 && questionType !== 'general_knowledge') {
-    text += `\n\n*(A government member can clarify further if needed.)*`;
-  }
-
   logger.logInteraction({
     userId: message.author.id,
     channelId: message.channel.id,
     message: message.content,
-    response: text,
+    response: formatted.text,
     confidence: result.confidence,
     documentsUsed: result.documentsConsulted,
-    escalated: !!result.should_escalate,
+    escalated: formatted.escalate,
     responseTimeMs: Date.now() - startTime,
     topic: classification.topic
   });
   cooldown.recordResponse(message.author.id, message.channel.id);
-  pushContext(message.channel.id, 'UNAI', result.answer);
+  pushContext(message.channel.id, 'UNAI', formatted.text);
+  activeConversation.markActive(message.channel.id, message.author.id);
 
   return {
     action: 'respond',
-    payload: { text, escalate: !!result.should_escalate, sources: result.sources }
+    payload: { text: formatted.text, escalate: formatted.escalate, sources: result.sources }
   };
 }
 

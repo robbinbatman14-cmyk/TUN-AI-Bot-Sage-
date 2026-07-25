@@ -75,6 +75,9 @@ const data = new SlashCommandBuilder()
   .addSubcommand(sc => sc.setName('document-images')
     .setDescription('Toggle whether uploaded/synced documents have embedded images analyzed (uses vision API quota)')
     .addBooleanOption(o => o.setName('value').setDescription('Analyze embedded images?').setRequired(true)))
+  .addSubcommand(sc => sc.setName('conversation-window')
+    .setDescription('How long (minutes) a member can keep talking to UNAI after tagging it, without re-tagging')
+    .addIntegerOption(o => o.setName('minutes').setDescription('1-30 minutes (default 7)').setRequired(true).setMinValue(1).setMaxValue(30)))
   .setDefaultMemberPermissions(PermissionFlagsBits.ManageGuild);
 
 async function execute(interaction) {
@@ -220,6 +223,11 @@ async function execute(interaction) {
       const enable = interaction.options.getBoolean('value');
       configManager.set('process_document_images', enable);
       return interaction.reply(`Embedded image analysis for documents: **${enable ? 'enabled' : 'disabled'}**. ${enable ? 'New uploads/updates/syncs will describe and OCR embedded images.' : 'New uploads/updates/syncs will index text only — already-analyzed documents keep their existing image descriptions until next updated.'}`);
+    }
+    case 'conversation-window': {
+      const minutes = interaction.options.getInteger('minutes');
+      configManager.set('active_conversation_minutes', minutes);
+      return interaction.reply(`Members can now keep talking to UNAI for **${minutes} minute(s)** after tagging it, without re-tagging.`);
     }
   }
 }

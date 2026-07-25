@@ -21,7 +21,8 @@ const DEFAULTS = {
   ai_provider: process.env.AI_PROVIDER || 'gemini',
   escalation_channel_id: '',
   google_doc_sync_interval_minutes: '60',
-  process_document_images: 'true'
+  process_document_images: 'true',
+  active_conversation_minutes: '7'
 };
 
 const getStmt = db.prepare('SELECT value FROM config WHERE key = ?');

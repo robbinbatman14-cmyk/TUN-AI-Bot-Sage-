@@ -18,6 +18,7 @@ const backupCommand = require('./commands/backupCommand');
 const sourcesCommand = require('./commands/sourcesCommand');
 const pnwCommand = require('./commands/pnwCommand');
 const helpCommand = require('./commands/helpCommand');
+const { paginateLines } = require('./help/textPaginator');
 
 const client = new Client({
   intents: [
@@ -103,7 +104,21 @@ client.on(Events.MessageCreate, async message => {
 
     if (result.action !== 'respond') return;
 
-    await message.reply({ content: result.payload.text.slice(0, 1900) });
+    // Discord messages cap at 2000 characters. A normal single answer
+    // almost always fits in one message, but a multi-question batch
+    // reply can easily run much longer — truncating it would silently
+    // cut off later answers in the middle. Split on line boundaries
+    // (reusing the same paginator built for /help) and send each page
+    // as its own message instead: first as a reply, the rest as
+    // follow-up sends in the same channel.
+    const pages = paginateLines(result.payload.text.split('\n'), 1900);
+    for (let i = 0; i < pages.length; i++) {
+      if (i === 0) {
+        await message.reply({ content: pages[i] });
+      } else {
+        await message.channel.send({ content: pages[i] });
+      }
+    }
 
     if (result.payload.escalate) {
       const escalationChannelId = configManager.get('escalation_channel_id');
