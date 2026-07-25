@@ -13,6 +13,15 @@ const { createTTLCache } = require('../utils/ttlCache');
 const CHUNK_SIZE = 900;      // ~characters per chunk
 const CHUNK_OVERLAP = 150;
 
+// Recognized by chunkText() below: content that already contains this
+// marker (e.g. from googleSheetsSource.js) is split along those exact
+// boundaries instead of by character count. Tabular data needs this —
+// a 900-character cut has no idea where one row ends and the next
+// begins, and could easily slice a roster entry in half. Prose documents
+// never contain this marker, so they're unaffected and still use the
+// character-based chunker below.
+const CHUNK_SEPARATOR = '\n\n===UNAI-CHUNK-BOUNDARY===\n\n';
+
 // Repeated/duplicate questions are common in an alliance Discord (many
 // members asking "how do I get a grant" independently) — caching the
 // query embedding for an hour avoids spending a fresh embedding request
@@ -20,6 +29,9 @@ const CHUNK_OVERLAP = 150;
 const queryEmbeddingCache = createTTLCache();
 
 function chunkText(text) {
+  if (text.includes(CHUNK_SEPARATOR)) {
+    return text.split(CHUNK_SEPARATOR).map(c => c.trim()).filter(Boolean);
+  }
   const chunks = [];
   let start = 0;
   while (start < text.length) {
@@ -123,4 +135,4 @@ async function search(query, { level, topK = 6 } = {}) {
   return scored.map(({ embedding, rank, ...rest }) => rest); // don't leak raw vectors/internal rank upward
 }
 
-module.exports = { indexDocument, search, chunkText, queryEmbeddingCache };
+module.exports = { indexDocument, search, chunkText, queryEmbeddingCache, CHUNK_SEPARATOR };

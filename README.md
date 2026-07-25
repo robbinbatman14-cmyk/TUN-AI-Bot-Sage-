@@ -161,11 +161,15 @@ Your bot is now running 24/7. Railway restarts it automatically if it crashes (`
 | `/ai costs value:hours` | Estimated API usage and cost over a recent window |
 | `/ai diagnose` | System health |
 | `/ai lockdown value:true\|false` | Emergency lockdown — stronger and more visible than `/ai disable`; also pauses knowledge base changes |
+| `/ai document-images value:true\|false` | Toggle embedded-image analysis for documents (uses vision API quota) |
+| `/ai conversation-window minutes:X` | How long a member can keep talking without re-tagging after a tagged interaction |
 | `/knowledge upload/approve/reject/archive/delete/reindex/list` | Manage documents (`.txt`, `.md`, `.pdf`, `.docx`) |
 | `/knowledge update id:X file:...` | Replace a document's content, keeping full version history |
 | `/knowledge versions id:X` | View a document's version history |
+| `/knowledge set-priority id:X priority:Y` | Change a document's source authority tier (1=Doctrine...4=Community) |
 | `/sources add-google-doc link:... title:... category:...` | Link a Google Doc as a live-syncing knowledge source |
-| `/sources list` / `sync` / `enable` / `disable` / `remove` | Manage knowledge sources |
+| `/sources add-google-sheet link:... title:... category:...` | Link a Google Sheet as a live-syncing, row/column-aware knowledge source |
+| `/sources list` / `sync` / `enable` / `disable` / `remove` | Manage knowledge sources (both Docs and Sheets) |
 | `/pnw nation lookup query:...` | Live nation lookup (name, leader name, or ID) |
 | `/pnw alliance lookup query:...` / `/pnw alliance top` | Live alliance lookup / rankings |
 | `/pnw verify link nation_id:X` | Self-serve: link your Discord to your nation |
@@ -217,6 +221,22 @@ Instead of exporting and re-uploading a document every time it changes, you can 
 
 **Sync interval:** defaults to every 60 minutes. Change it by editing the `google_doc_sync_interval_minutes` config value directly in the database, or ask me to add a slash command for it if you'll want to change this often — I kept it out of the command surface for now to avoid it feeling like a dial you need to touch.
 
+### Google Sheets knowledge sync (structured data — rosters, tables, records)
+
+A Google Sheet gets handled fundamentally differently from a Doc, because it should be — treating a member roster as one long block of prose would be a poor way to answer "is Odyssey grant-eligible?" or "how many cities does the roster say Rose Kingdom has?" Instead, each row is converted into its own labeled record using the column headers, e.g. `Row 14 — Nation: Oduduwa Nation | Leader: Odyssey | Cities: 40 | Grant Eligible: Yes`, and — importantly — chunks are split along actual row boundaries during indexing, never mid-row by raw character count. That distinction matters: a naive character-based cut could easily slice one roster entry in half across two chunks, corrupting exactly the row/column lookup this feature exists for.
+
+**Setup, per sheet:** identical flow to Docs — share as "Anyone with the link – Viewer", then:
+```
+/sources add-google-sheet link:[paste] title:"Member Roster" category:roster
+```
+All tabs in the spreadsheet are read and indexed (not just the first one), so a single workbook with separate tabs for roster/academy/audits/tax all gets pulled in together. Comes in pending like anything else — `/knowledge approve id:X` once, then it syncs automatically on the same schedule as Docs.
+
+**Good uses per your examples:** member rosters, grant eligibility, academy progress, audit records, tax tables, war assignments — anything genuinely tabular. For prose (a written guide, policy explanation, procedures), a Doc is still the better fit; don't reach for a Sheet just to avoid re-uploading a text document.
+
+**A real dependency note, not just a formality:** this uses the `xlsx` (SheetJS) library to parse spreadsheets — but specifically installed from SheetJS's own distribution (`cdn.sheetjs.com`), not the same-named package on the regular npm registry. That registry version is several years stale and has known vulnerabilities (denial-of-service, prototype pollution) that SheetJS themselves have publicly warned about — worth knowing since `npm install` will show an unusual (URL-based, not version-based) dependency in `package.json` for this one package, which is intentional, not a mistake.
+
+**Same security tradeoff as Docs applies:** public link-sharing means anyone with the URL can read the raw spreadsheet, independent of the Discord visibility tier you set. Fine for most operational rosters; think twice for anything with sensitive personal or financial detail.
+
 ### Live Politics & War data + hybrid intelligence
 
 UNAI can now answer from three kinds of source in one response: your uploaded documents, live Politics & War game data, or both — and it decides which to use automatically, per question.
@@ -253,6 +273,62 @@ UNAI now behaves less like a search box and more like a real conversational assi
 
 **One honest limitation:** math is done by the model's own arithmetic reasoning in its response, not by a separate verified calculator — there's no code-execution or tool-calling loop wired into the AI calls (a real one would be a meaningfully larger addition across all three providers). This is generally reliable for the kind of numbers a Discord bot gets asked about, but isn't guaranteed exact for complex multi-step calculations — worth a second look before anyone treats a generated number as gospel for a real financial decision. Happy to build genuine verified-calculator tool-calling next if this turns out to matter in practice.
 
+### Embedding quota optimizations
+
+If you hit `RESOURCE_EXHAUSTED` / an embedding quota error, several things now work together to handle it:
+
+1. **General-knowledge questions no longer touch the embedding API at all.** Previously every question that reached the answer engine spent one embedding request on the knowledge-base search, even questions like "explain beige mechanics" that had zero chance of matching an uploaded document. The classifier's `question_type` now gates this — only `alliance_specific` and `mixed` questions search the knowledge base; pure `general_knowledge` questions (P&W mechanics, strategy, math, teaching) skip it entirely and cost zero embedding requests.
+2. **Document indexing is batched**, capped at 40 texts per request (a document with more chunks just takes a couple of requests, still far fewer than one-per-chunk), with a short pacing gap between batches and between documents during a multi-document `/backup import` — so several large documents processed back-to-back don't burst a per-minute quota.
+3. **Embedding requests now automatically retry on rate-limit errors**, the same way chat requests already did — a real gap that caused exactly the failure you might have hit: `embedBatch()` had no retry logic at all until this fix, even though a `429` here is just as transient/recoverable as a chat `429`, and Google's own error message tells us exactly how long to wait. Verified this actually recovers correctly (failed first attempt → automatic wait → succeeded) before shipping it.
+4. **Repeated questions are cached.** If the same or a near-identical question gets asked again within an hour, the embedding from the first time is reused instead of spending another request.
+
+None of this changes what the bot can answer — it's purely about not spending API calls where they weren't buying anything, and recovering automatically from the transient failures that are expected to happen occasionally on a free tier. If you're still hitting a hard wall after all of this (the daily cap, not a per-minute blip), your remaining options are enabling billing on the same Google AI Studio project (cheap, instant) or waiting for the daily reset.
+
+### Embedded image analysis (diagrams, flowcharts, screenshots)
+
+Uploaded `.docx` files and synced Google Docs now have their embedded images analyzed, not just ignored. Each image gets a concise description plus OCR of any readable text, appended to the document's indexed content as a labeled `--- Images in this document ---` section — so a question about something shown only in a diagram or infographic can actually be answered.
+
+**How it works:** `.docx` files (both direct uploads and Google Docs, which are now fetched as `.docx` instead of plain text specifically to get at their images) are parsed with `mammoth`, which hands back each embedded image's raw bytes. Each image is sent to whichever AI provider is active (Gemini, GPT-4o-mini, and Claude are all multimodal, so this works regardless of your `/ai provider` setting) with a prompt asking for a description and OCR.
+
+**Cost control:** capped at 15 images per document by default — a document with more than that gets the first 15 analyzed with a note that the rest were skipped, rather than silently burning a large chunk of your daily AI request quota on one document. Toggle the whole feature off with `/ai document-images value:false` if quota is tight; already-analyzed documents keep their descriptions either way.
+
+**Why Google Doc syncing doesn't reprocess images on every check:** the sync system needs to detect "did this Google Doc actually change" without re-running (paid-quota) image analysis just to find out. It does this by hashing the raw downloaded file bytes, never the AI-generated descriptions — image descriptions aren't perfectly identical between runs even for an unchanged image (it's an LLM, not a deterministic function), so hashing them would make the sync system think something changed on every single check and reprocess everything, every time, for nothing. Hashing the source bytes instead means an unchanged Doc costs one lightweight fetch per sync cycle and zero vision-API calls — only an actual edit triggers re-analysis.
+
+**Known gap:** PDF image extraction isn't included — the well-known Node libraries for it either need native build tools or a canvas-rendering backend, both of which carry the same Windows Build Tools risk that came up with `better-sqlite3` earlier. If a PDF's images matter, converting it to `.docx` first (or re-uploading as a Google Doc) gets full image analysis; a future addition here would need a careful, low-risk dependency choice.
+
+### Source authority (doctrine overrides general advice)
+
+Every document has a priority tier, and the bot is instructed to treat higher-authority sources as overriding lower-authority ones when they conflict:
+
+| Tier | Meaning |
+|---|---|
+| 1 | Doctrine, Constitution, official policies, resolutions — highest authority |
+| 2 | Internal guides & handbooks (default for uploads) |
+| 3 | Official Politics & War documentation |
+| 4 | Community guides and other external sources |
+
+The model's own general knowledge is always treated as lower authority than *any* stored document — even a Priority 4 community guide outranks it. If a general Politics & War strategy conflicts with TUN's own doctrine (the example that prompted this: general advice says farming is fine, TUN doctrine discourages it), the bot is instructed to say so explicitly — mention the general take for context, then state clearly that TUN doctrine overrides it — rather than silently picking one.
+
+Set it on upload: `/knowledge upload ... priority:1`. Change it later: `/knowledge set-priority id:X priority:1`. Same option exists on `/sources add-google-doc`.
+
+**One implementation choice worth knowing about, since it's a deliberate deviation from "rank strictly by authority, then relevance":** ranking uses a priority *boost* added to semantic-relevance score, not a strict "all Priority 1 above all Priority 2" sort. A strict priority-first sort would let a completely irrelevant Priority-1 document crowd a genuinely relevant Priority-3/4 document out of the results entirely for unrelated questions — worse retrieval quality for no benefit. The boost means: among sources that are actually relevant to the question, higher authority wins; a source has to clear a relevance bar to be surfaced at all. The real "doctrine overrides general advice" behavior lives in the answer-generation instructions, not the ranking — ranking just improves the odds that doctrine actually makes it into context in the first place. Tested against both the reported scenario (doctrine relevant → wins) and the failure mode a strict sort would hit (doctrine irrelevant → correctly doesn't crowd out the real answer).
+
+**The other half of the actual bug:** "is farming advisable" was likely being classified as `general_knowledge` (pure game strategy), which — since the embedding-quota fix a few rounds back — skips the knowledge-base search *entirely*. No ranking scheme fixes that, since nothing was retrieved to rank. Fixed by tightening the classifier: any question seeking advice or a recommendation now defaults to `mixed` (which does search) unless there's no plausible way alliance doctrine could have a stance on it. If doctrine still doesn't surface for a similar question after this update, it's worth checking the document's priority is set correctly and that it's actually approved (`/knowledge list`).
+
+### Greetings and staying in conversation
+
+`@SAGE hello` (or hi/hey/good morning/sup/etc.) gets an instant reply with **zero API cost** — it's pure pattern matching, no AI call at all. Only works when actually tagged; an untagged "hello" in a monitored channel is still ignored, same as before. If the greeting has anything else attached ("hey, what's the tax rate") it's treated as a real question instead of a greeting, and goes through the normal pipeline.
+
+After any tagged interaction (greeting or a real question), that member can keep talking in the same channel for a few minutes **without re-tagging** — so `@SAGE hello` → `"Can you explain beige mechanics?"` works naturally. This is scoped per-member, not per-channel: someone else chatting nearby doesn't get swept into the conversation just because you talked to the bot a minute ago. Configurable: `/ai conversation-window minutes:10` (default 7).
+
+### Multi-question messages
+
+A numbered or bulleted list of questions in one message — `1. What's our tax rate? 2. Who's the Minister of Economy? 3. How does beige work?` — now gets split and answered individually, each with its own retrieval and reasoning, returned as a numbered list of answers. Works for numbered lists, bulleted lists (`-`/`*`/`•`), and a message that's *entirely* separate question-lines with no markers at all. More than 10 questions at once gets a polite "please split this into smaller batches" instead of being processed.
+
+This only engages when the bot was actually addressed (tagged, or mid active-conversation) — an unaddressed multi-line message in a passively-monitored channel doesn't trigger it, so a random bulleted grocery list someone posts nearby won't get bulk-answered.
+
+**Known limitation:** detection is pattern-based (list markers or one-question-per-line), not AI-based, to keep it free and predictable. A single sentence with multiple questions mashed together — "what's our tax rate and why was it raised?" — is *not* split; that would need real language understanding to do reliably, which is a larger, costed addition left for later if it turns out to matter in practice.
+
 ## How it actually decides to respond (for your own understanding)
 
 1. Ignores bots, webhooks, DMs.
@@ -273,8 +349,8 @@ This matches the spec's core principle: **"Should I respond?" is always asked be
 - **Verified calculator / tool-calling** — math is currently the model's own arithmetic reasoning in its text response, not a separate executed calculation. Reliable for typical Discord-bot-scale numbers, not guaranteed exact for complex multi-step math. A real fix means wiring function-calling/tool-execution into all three AI providers — a meaningfully bigger change than the reasoning-prompt work done here.
 - **Active war lookups and broader roster queries** (who's fighting right now, alliance-wide vacation/beige rosters) — nation/alliance/top-alliance lookups and Discord-nation linking are built; wars are the natural next addition to `src/integrations/pnw/`.
 - Live integrations with Banking / Audit / Legislation / Activity / Election bots (Sections 47–54) — nothing exists yet to connect to. When one of those bots has a database or API, a new file goes in `src/integrations/`, and `answerEngine.js` gets a few lines to pull live data in before generating an answer. Nothing else needs to change.
-- Other dynamic knowledge source types (websites, GitHub repos, Google Sheets) — the architecture (`src/knowledge/sourceManager.js` + a per-type fetch module like `googleDocsSource.js`) is built to extend to these without changing existing code; only Google Docs is implemented so far.
-- PDF/DOCX/OCR for scanned documents — plain `.txt`, `.md`, `.pdf`, and `.docx` are supported; a scanned/image-only PDF with no text layer still needs OCR first (outside this build's scope).
+- Other dynamic knowledge source types (websites, GitHub repos) — the architecture (`src/knowledge/sourceManager.js` + a per-type fetch module like `googleDocsSource.js`/`googleSheetsSource.js`) is built to extend to these without changing existing code; Google Docs and Google Sheets are both implemented now.
+- PDF image extraction and OCR for scanned/image-only PDFs — `.docx` (uploaded or via Google Docs) gets full embedded-image analysis; `.pdf` is still text-only. See "Embedded image analysis" above for why.
 - `/backup export` doesn't currently include knowledge sources (the Google Doc links) or nation-verification links — only documents themselves. Worth adding if you come to rely on either heavily.
 - A web dashboard — everything is Discord-native for v1, per the spec's "no code editing required" principle.
 

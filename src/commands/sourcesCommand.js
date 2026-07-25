@@ -8,28 +8,41 @@ const configManager = require('../config/configManager');
 const sourceManager = require('../knowledge/sourceManager');
 
 const category = 'Knowledge Sources';
-const MUTATING = ['add-google-doc', 'sync', 'enable', 'disable', 'remove'];
+const MUTATING = ['add-google-doc', 'add-google-sheet', 'sync', 'enable', 'disable', 'remove'];
+
+const PRIORITY_CHOICES = [
+  { name: '1 — Doctrine / Constitution / Official Policy (highest authority)', value: 1 },
+  { name: '2 — Internal Guides & Handbooks (default)', value: 2 },
+  { name: '3 — Official Politics & War Documentation', value: 3 },
+  { name: '4 — Community / External Guides (lowest authority)', value: 4 }
+];
+
+const VISIBILITY_CHOICES = [
+  { name: 'Public', value: 'public' }, { name: 'Members Only (default)', value: 'members_only' },
+  { name: 'Government', value: 'government' }, { name: 'Ministry', value: 'ministry' }, { name: 'Owner', value: 'owner' }
+];
 
 const data = new SlashCommandBuilder()
   .setName('sources')
-  .setDescription('Manage dynamic knowledge sources that sync automatically (Google Docs, more coming)')
+  .setDescription('Manage dynamic knowledge sources that sync automatically (Google Docs, Google Sheets)')
   .addSubcommand(sc => sc.setName('add-google-doc')
     .setDescription('Link a Google Doc as a knowledge source (must be shared "Anyone with the link – Viewer")')
     .addStringOption(o => o.setName('link').setDescription('Google Doc URL').setRequired(true))
     .addStringOption(o => o.setName('title').setDescription('Document title').setRequired(true))
     .addStringOption(o => o.setName('category').setDescription('Category, e.g. constitution, military').setRequired(true))
     .addIntegerOption(o => o.setName('priority').setDescription('Source authority tier (default: 2 — Internal Guides)').setRequired(false)
-      .addChoices(
-        { name: '1 — Doctrine / Constitution / Official Policy (highest authority)', value: 1 },
-        { name: '2 — Internal Guides & Handbooks (default)', value: 2 },
-        { name: '3 — Official Politics & War Documentation', value: 3 },
-        { name: '4 — Community / External Guides (lowest authority)', value: 4 }
-      ))
+      .addChoices(...PRIORITY_CHOICES))
     .addStringOption(o => o.setName('visibility').setDescription('Who can see this').setRequired(false)
-      .addChoices(
-        { name: 'Public', value: 'public' }, { name: 'Members Only (default)', value: 'members_only' },
-        { name: 'Government', value: 'government' }, { name: 'Ministry', value: 'ministry' }, { name: 'Owner', value: 'owner' }
-      )))
+      .addChoices(...VISIBILITY_CHOICES)))
+  .addSubcommand(sc => sc.setName('add-google-sheet')
+    .setDescription('Link a Google Sheet as a knowledge source.')
+    .addStringOption(o => o.setName('link').setDescription('Google Sheet URL').setRequired(true))
+    .addStringOption(o => o.setName('title').setDescription('Sheet title, e.g. "Member Roster"').setRequired(true))
+    .addStringOption(o => o.setName('category').setDescription('Category, e.g. roster, academy, audits, tax').setRequired(true))
+    .addIntegerOption(o => o.setName('priority').setDescription('Source authority tier (default: 2 — Internal Guides)').setRequired(false)
+      .addChoices(...PRIORITY_CHOICES))
+    .addStringOption(o => o.setName('visibility').setDescription('Who can see this').setRequired(false)
+      .addChoices(...VISIBILITY_CHOICES)))
   .addSubcommand(sc => sc.setName('list').setDescription('List all knowledge sources'))
   .addSubcommand(sc => sc.setName('sync').setDescription('Manually sync a source right now')
     .addIntegerOption(o => o.setName('id').setDescription('Source ID').setRequired(true)))
@@ -70,6 +83,28 @@ async function execute(interaction) {
       );
     } catch (err) {
       return interaction.editReply(`Couldn't add that Google Doc: ${err.message}`);
+    }
+  }
+
+  if (sub === 'add-google-sheet') {
+    await interaction.deferReply({ ephemeral: true });
+    const link = interaction.options.getString('link');
+    const title = interaction.options.getString('title');
+    const docCategory = interaction.options.getString('category').toLowerCase();
+    const priority = interaction.options.getInteger('priority') || 2;
+    const visibility = interaction.options.getString('visibility') || 'members_only';
+
+    try {
+      const result = await sourceManager.addGoogleSheetSource({
+        url: link, title, category: docCategory, visibility, priority, addedBy: interaction.user.id
+      });
+      return interaction.editReply(
+        `Google Sheet linked as source **#${result.sourceId}** → document **#${result.documentId}** (pending). ` +
+        `Found ${result.sheetNames.length} tab(s) [${result.sheetNames.join(', ')}], ${result.rowCount} data row(s) total. ` +
+        `Run \`/knowledge approve id:${result.documentId}\` once to activate it — after that, edits to the Sheet sync automatically.`
+      );
+    } catch (err) {
+      return interaction.editReply(`Couldn't add that Google Sheet: ${err.message}`);
     }
   }
 

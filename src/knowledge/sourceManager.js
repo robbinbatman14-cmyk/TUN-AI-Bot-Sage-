@@ -1,43 +1,55 @@
 // ============================================================
 // Knowledge Source Manager (Section 29 - Dynamic Knowledge
 // Sources, Section 39 - Automatic Knowledge Updates)
-// A "source" is an external origin (currently: a Google Doc) that
-// stays linked to a document row. Syncing re-fetches the source,
-// and if content changed, feeds it through documentManager's
+// A "source" is an external origin (Google Doc or Google Sheet)
+// that stays linked to a document row. Syncing re-fetches the
+// source, and if content changed, feeds it through documentManager's
 // existing versioning system (Section 37) — so every auto-sync
 // is just another version, with full history, using the same
 // machinery a manual /knowledge update would use.
 //
 // Change detection compares a hash of the SOURCE's raw bytes
-// (computed in googleDocsSource.js), never a hash of the final
-// AI-processed text — see the comment there for why that distinction
-// matters once image descriptions (which aren't perfectly
-// deterministic) are part of the pipeline.
+// (computed in googleDocsSource.js / googleSheetsSource.js), never
+// a hash of the final AI-processed text — see the comment in
+// googleDocsSource.js for why that distinction matters once image
+// descriptions (which aren't perfectly deterministic) are part of
+// the pipeline.
 //
-// Designed to extend to other source types later (website,
-// GitHub, Google Sheets) without changing this file's shape —
-// each new type just needs its own fetch module like
-// googleDocsSource.js and a branch in syncSource().
+// Adding a new source type means: a fetch module like
+// googleDocsSource.js/googleSheetsSource.js that returns
+// {rawHash, ...}, a branch in fetchRaw()/buildContent() below, and
+// an add*Source() convenience function. Nothing else changes —
+// listSources/syncSource/syncAllDueSources are already type-agnostic.
 // ============================================================
 const db = require('../config/db');
 const documentManager = require('./documentManager');
 const googleDocsSource = require('./googleDocsSource');
+const googleSheetsSource = require('./googleSheetsSource');
 const imageAnalyzer = require('./imageAnalyzer');
 
-/** Fetches a source and builds its final indexable text (including analyzed images). */
-async function fetchAndBuildContent(source) {
-  if (source.type !== 'google_doc') {
-    throw new Error(`Unknown source type "${source.type}".`);
+/** Fetches JUST the raw source + hash for a source — cheap, no AI calls yet. */
+async function fetchRaw(source) {
+  if (source.type === 'google_doc') return googleDocsSource.fetchGoogleDoc(source.external_id);
+  if (source.type === 'google_sheet') return googleSheetsSource.fetchGoogleSheet(source.external_id);
+  throw new Error(`Unknown source type "${source.type}".`);
+}
+
+/** Turns a fetchRaw() result into the final indexable text for its type. */
+async function buildContent(source, raw) {
+  if (source.type === 'google_doc') {
+    const imageBlocks = raw.images.length > 0 ? await imageAnalyzer.describeImages(raw.images) : [];
+    return imageAnalyzer.appendImageDescriptions(raw.text, imageBlocks);
   }
-  const { rawHash, text, images } = await googleDocsSource.fetchGoogleDoc(source.external_id);
-  const imageBlocks = images.length > 0 ? await imageAnalyzer.describeImages(images) : [];
-  const content = imageAnalyzer.appendImageDescriptions(text, imageBlocks);
-  return { rawHash, content, imageCount: images.length };
+  if (source.type === 'google_sheet') {
+    return raw.content; // already fully built (row-chunked) by googleSheetsSource.js
+  }
+  throw new Error(`Unknown source type "${source.type}".`);
 }
 
 async function addGoogleDocSource({ url, title, category, visibility, priority = 2, addedBy }) {
   const docId = googleDocsSource.extractGoogleDocId(url);
-  const { rawHash, content } = await fetchAndBuildContent({ type: 'google_doc', external_id: docId });
+  const raw = await fetchRaw({ type: 'google_doc', external_id: docId });
+  const content = await buildContent({ type: 'google_doc' }, raw);
 
   const documentId = documentManager.addDocument({
     title, category, visibility, priority, content, filename: `google-doc-${docId}.docx`, uploadedBy: addedBy
@@ -46,9 +58,26 @@ async function addGoogleDocSource({ url, title, category, visibility, priority =
   const result = db.prepare(`
     INSERT INTO knowledge_sources (type, source_url, external_id, document_id, content_hash, sync_enabled, added_by)
     VALUES ('google_doc', ?, ?, ?, ?, 1, ?)
-  `).run(url, docId, documentId, rawHash, addedBy);
+  `).run(url, docId, documentId, raw.rawHash, addedBy);
 
   return { sourceId: result.lastInsertRowid, documentId };
+}
+
+async function addGoogleSheetSource({ url, title, category, visibility, priority = 2, addedBy }) {
+  const sheetId = googleSheetsSource.extractGoogleSheetId(url);
+  const raw = await fetchRaw({ type: 'google_sheet', external_id: sheetId });
+  const content = await buildContent({ type: 'google_sheet' }, raw);
+
+  const documentId = documentManager.addDocument({
+    title, category, visibility, priority, content, filename: `google-sheet-${sheetId}.xlsx`, uploadedBy: addedBy
+  });
+
+  const result = db.prepare(`
+    INSERT INTO knowledge_sources (type, source_url, external_id, document_id, content_hash, sync_enabled, added_by)
+    VALUES ('google_sheet', ?, ?, ?, ?, 1, ?)
+  `).run(url, sheetId, documentId, raw.rawHash, addedBy);
+
+  return { sourceId: result.lastInsertRowid, documentId, sheetNames: raw.sheetNames, rowCount: raw.rowCount };
 }
 
 function listSources() {
@@ -74,12 +103,12 @@ function removeSource(id) {
 
 /**
  * Re-fetches one source and, if the SOURCE ITSELF changed (by raw-byte
- * hash), rebuilds its content (including re-analyzing images) and pushes
- * it through documentManager.updateDocumentContent — which archives the
- * old version and only re-indexes if the document is currently approved.
- * If the raw source is unchanged, nothing is re-fetched-and-processed
- * beyond the initial download, so an unmodified Google Doc costs zero
- * additional vision/embedding requests on repeat syncs.
+ * hash), rebuilds its content (re-analyzing images for Docs; re-parsing
+ * rows for Sheets) and pushes it through documentManager.updateDocumentContent
+ * — which archives the old version and only re-indexes if the document is
+ * currently approved. If the raw source is unchanged, no further
+ * processing happens beyond the initial download, so an unmodified source
+ * costs zero additional vision/embedding requests on repeat syncs.
  */
 async function syncSource(id) {
   const source = getSource(id);
@@ -88,22 +117,17 @@ async function syncSource(id) {
   const doc = documentManager.getDocument(source.document_id);
   if (!doc) throw new Error('The document this source was linked to no longer exists.');
 
-  // Fetch (cheap: text + raw images, no AI calls yet) to get the raw hash
-  // before deciding whether the more expensive image-analysis step is
-  // even needed.
-  const { rawHash, text, images } = await googleDocsSource.fetchGoogleDoc(source.external_id);
+  const raw = await fetchRaw(source);
 
-  if (rawHash === source.content_hash) {
+  if (raw.rawHash === source.content_hash) {
     db.prepare("UPDATE knowledge_sources SET last_synced_at = CURRENT_TIMESTAMP, last_sync_status = 'unchanged' WHERE id = ?").run(id);
     return { synced: false, reason: 'unchanged' };
   }
 
-  const imageBlocks = images.length > 0 ? await imageAnalyzer.describeImages(images) : [];
-  const content = imageAnalyzer.appendImageDescriptions(text, imageBlocks);
-
+  const content = await buildContent(source, raw);
   const updateResult = await documentManager.updateDocumentContent(source.document_id, content);
   db.prepare("UPDATE knowledge_sources SET content_hash = ?, last_synced_at = CURRENT_TIMESTAMP, last_sync_status = 'updated' WHERE id = ?")
-    .run(rawHash, id);
+    .run(raw.rawHash, id);
 
   return { synced: true, ...updateResult };
 }
@@ -124,6 +148,6 @@ async function syncAllDueSources() {
 }
 
 module.exports = {
-  addGoogleDocSource, listSources, getSource,
+  addGoogleDocSource, addGoogleSheetSource, listSources, getSource,
   setSourceEnabled, removeSource, syncSource, syncAllDueSources
 };
