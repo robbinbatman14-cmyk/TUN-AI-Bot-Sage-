@@ -133,11 +133,12 @@ CREATE TABLE IF NOT EXISTS document_versions (
 
 CREATE TABLE IF NOT EXISTS knowledge_sources (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL, -- google_doc for now; website/github/google_sheet are natural future additions
+  type TEXT NOT NULL, -- google_doc, google_sheet
   source_url TEXT NOT NULL,
-  external_id TEXT, -- e.g. the Google Doc ID extracted from the URL
+  external_id TEXT, -- e.g. the Google Doc/Sheet ID extracted from the URL
   document_id INTEGER NOT NULL,
   content_hash TEXT,
+  sheet_purpose TEXT, -- google_sheet only: member_roster | academy_records | audit_records | grant_database | tax_table | war_assignments | other | NULL
   sync_enabled INTEGER NOT NULL DEFAULT 1,
   last_synced_at TEXT,
   last_sync_status TEXT,
@@ -177,5 +178,6 @@ addColumnIfMissing('logs', 'topic TEXT');
 // (Priority 5, "general AI knowledge", is never a stored document — it's
 // the model's own training knowledge, implicitly the lowest authority.)
 addColumnIfMissing('documents', 'priority INTEGER NOT NULL DEFAULT 2');
+addColumnIfMissing('knowledge_sources', 'sheet_purpose TEXT');
 
 module.exports = db;
