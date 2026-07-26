@@ -24,6 +24,14 @@ const faqManager = require('../knowledge/faqManager');
 const configManager = require('../config/configManager');
 const liveDataFetcher = require('../integrations/liveDataFetcher');
 const { PRIORITY_LABELS } = require('../knowledge/documentManager');
+const sourceManager = require('../knowledge/sourceManager');
+const { labelFor: sheetPurposeLabel } = require('../knowledge/sheetPurposes');
+
+// Safety cap on a structured-source full-document pull — generous enough
+// to cover realistic alliance rosters (40 chunks * 25 rows/chunk = up to
+// 1,000 records) while protecting against a pathological huge sheet
+// blowing up the prompt size/cost.
+const MAX_STRUCTURED_CHUNKS = 40;
 
 const PERSONALITIES = {
   professional: 'Respond in a concise, formal, direct tone.',
@@ -49,6 +57,7 @@ Core principles you must always follow:
 - You may perform calculations (infrastructure costs, revenue estimates, resource conversions, military purchasing, loan math, warchest planning) using your own arithmetic. Show your work briefly so it can be checked, and note that important financial decisions are worth double-checking rather than treating a single generated number as guaranteed exact.
 - For strategic questions ("should I build another city", "which project next", "is this a good raid target"), reason through it and explain your recommendation — you're not making the decision for them, you're helping them think it through. Per Section 101, clearly distinguish in your wording between stating a fact, offering a recommendation/opinion, and citing official policy — don't let a personal-strategy opinion read as if it were TUN policy.
 - Never invent or guess at TUN-specific policy, numbers, live game stats, or procedures under any question type. If a live data block says a lookup failed or found nothing, relay that honestly rather than inventing plausible-sounding stats.
+- A "[Structured Data: ...]" block is a complete or near-complete pull from a tabular source (e.g. a member roster), not a sample — if it says "complete", you have every matching row and should list them all plainly rather than summarizing or picking a few examples; if it says some were omitted for length, say so and mention the count, don't pretend the list is exhaustive.
 ${officialOnly ? '- OFFICIAL ANSWERS ONLY MODE IS ON: for the alliance_specific parts of a question, if retrieved context does not clearly cover it, refuse that part and say a government member should be consulted. This does NOT restrict general Politics & War knowledge, mechanics explanations, strategy discussion, math, or teaching — help with those normally even in this mode, and for "mixed" questions still answer the general-knowledge part.' : ''}
 - ${PERSONALITIES[personality] || PERSONALITIES.professional}
 
@@ -79,24 +88,48 @@ async function answer(question, level, contextText = '', classification = null) 
 
   const faqHits = faqManager.findRelevant(question, 3); // keyword-only, zero embedding cost — always fine to run
 
+  // Structured-source routing: if the classifier matched a purpose-tagged
+  // Google Sheet (e.g. "list all members" -> member_roster), pull the
+  // WHOLE document's chunks in original order instead of a top-K semantic
+  // search. A "list everything" request has no single chunk that's
+  // obviously "most relevant" — top-K would return a near-arbitrary
+  // subset and miss most of the data, which is exactly the bug this
+  // exists to fix, not just a routing nicety.
+  let chunks = [];
+  let structuredSourceUsed = null;
+  if (classification?.structured_source) {
+    const documentId = sourceManager.getDocumentIdForPurpose(classification.structured_source);
+    if (documentId) {
+      const allChunks = knowledgeStore.getAllChunksForDocument(documentId, level);
+      chunks = allChunks.slice(0, MAX_STRUCTURED_CHUNKS);
+      structuredSourceUsed = {
+        purpose: classification.structured_source,
+        totalChunks: allChunks.length,
+        truncated: allChunks.length > MAX_STRUCTURED_CHUNKS
+      };
+    }
+  }
+
   // Skip the knowledge-base vector search — and therefore its embedding
-  // API call — entirely for pure general-knowledge questions. There's
-  // nothing alliance-specific to retrieve for "explain beige mechanics"
-  // or a raw infrastructure-cost calculation, so searching was previously
-  // spending one embedding request per question regardless of whether it
-  // could possibly help. This is the main lever for embedding-quota usage,
-  // since every message that reached this function used to cost one
-  // embedding call no matter its type.
-  const chunks = questionType === 'general_knowledge'
-    ? []
-    : await knowledgeStore.search(question, { level, topK: 6 });
+  // API call — entirely for pure general-knowledge questions, AND when a
+  // structured source already answered the retrieval question above.
+  // There's nothing alliance-specific to retrieve for "explain beige
+  // mechanics" or a raw infrastructure-cost calculation, so searching was
+  // previously spending one embedding request per question regardless of
+  // whether it could possibly help.
+  if (questionType !== 'general_knowledge' && !structuredSourceUsed) {
+    chunks = await knowledgeStore.search(question, { level, topK: 6 });
+  }
 
   const liveData = await liveDataFetcher.fetchRelevantLiveData(classification, question);
 
   const contextBlocks = [
     ...(liveData ? [liveData] : []),
     ...faqHits.map(f => `[FAQ: ${f.question}]\n${f.answer}`),
-    ...chunks.map(c => `[Document: ${c.title} (${c.category}, v${c.version}) — Priority ${c.priority}: ${PRIORITY_LABELS[c.priority] || 'Unspecified'}]\n${c.content}`)
+    ...(structuredSourceUsed
+      ? [`[Structured Data: ${sheetPurposeLabel(structuredSourceUsed.purpose)}${structuredSourceUsed.truncated ? ` — showing first ${MAX_STRUCTURED_CHUNKS} of ${structuredSourceUsed.totalChunks} sections, ask about a specific record for full detail if it's not here` : ' — complete'}]\n` +
+        chunks.map(c => c.content).join('\n\n')]
+      : chunks.map(c => `[Document: ${c.title} (${c.category}, v${c.version}) — Priority ${c.priority}: ${PRIORITY_LABELS[c.priority] || 'Unspecified'}]\n${c.content}`))
   ];
 
   const retrievedContext = contextBlocks.length > 0
@@ -121,7 +154,9 @@ async function answer(question, level, contextText = '', classification = null) 
     parsed = { answer: '', confidence: 0, should_respond: false, should_escalate: false, sources: [] };
   }
 
-  const documentTitles = chunks.map(c => c.title);
+  const documentTitles = structuredSourceUsed
+    ? [`${chunks[0]?.title || 'Structured Data'} (${sheetPurposeLabel(structuredSourceUsed.purpose)})`]
+    : chunks.map(c => c.title);
   if (liveData) documentTitles.push('Live Politics & War Data');
 
   return {
