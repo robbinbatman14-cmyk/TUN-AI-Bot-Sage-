@@ -169,6 +169,7 @@ Your bot is now running 24/7. Railway restarts it automatically if it crashes (`
 | `/knowledge set-priority id:X priority:Y` | Change a document's source authority tier (1=Doctrine...4=Community) |
 | `/sources add-google-doc link:... title:... category:...` | Link a Google Doc as a live-syncing knowledge source |
 | `/sources add-google-sheet link:... title:... category:...` | Link a Google Sheet as a live-syncing, row/column-aware knowledge source |
+| `/sources set-purpose id:X purpose:Y` | Tag a sheet's purpose so broad requests ("list all members") auto-route to it |
 | `/sources list` / `sync` / `enable` / `disable` / `remove` | Manage knowledge sources (both Docs and Sheets) |
 | `/pnw nation lookup query:...` | Live nation lookup (name, leader name, or ID) |
 | `/pnw alliance lookup query:...` / `/pnw alliance top` | Live alliance lookup / rankings |
@@ -232,6 +233,8 @@ A Google Sheet gets handled fundamentally differently from a Doc, because it sho
 All tabs in the spreadsheet are read and indexed (not just the first one), so a single workbook with separate tabs for roster/academy/audits/tax all gets pulled in together. Comes in pending like anything else — `/knowledge approve id:X` once, then it syncs automatically on the same schedule as Docs.
 
 **Good uses per your examples:** member rosters, grant eligibility, academy progress, audit records, tax tables, war assignments — anything genuinely tabular. For prose (a written guide, policy explanation, procedures), a Doc is still the better fit; don't reach for a Sheet just to avoid re-uploading a text document.
+
+**Auto-routing with purpose tags:** tag a sheet with what it *is* — `/sources add-google-sheet ... purpose:"Member Roster"` — and requests like "list all members", "show the roster", "who are all our members" route to it automatically, with no need to say "from the sheet". This matters more than it sounds: a plain semantic search only pulls the handful of most-similar chunks, which works for "is Odyssey grant-eligible?" but not for "list everyone" — there's no single row that's obviously "the most relevant" to a request for *all* of them. A purpose-tagged sheet skips that search entirely and pulls the whole sheet (capped at ~1,000 rows, with a clear note if truncated), so a "list all" request actually gets everyone, not a near-random sample. Available purposes: Member Roster, Academy Records, Audit Records, Grant Database, Tax Table, War Assignments, or Other/Custom. Change it later with `/sources set-purpose id:X purpose:...`. Leaving it untagged is fine too — the sheet still gets found by normal semantic search for specific lookups, it just won't auto-route for broad "list everything" requests.
 
 **A real dependency note, not just a formality:** this uses the `xlsx` (SheetJS) library to parse spreadsheets — but specifically installed from SheetJS's own distribution (`cdn.sheetjs.com`), not the same-named package on the regular npm registry. That registry version is several years stale and has known vulnerabilities (denial-of-service, prototype pollution) that SheetJS themselves have publicly warned about — worth knowing since `npm install` will show an unusual (URL-based, not version-based) dependency in `package.json` for this one package, which is intentional, not a mistake.
 
