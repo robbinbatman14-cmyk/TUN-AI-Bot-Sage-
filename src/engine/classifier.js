@@ -1,15 +1,21 @@
 // ============================================================
 // Classifier (Sections 14, 15, 17 - Question Detection, Topic
 // Classification, Confidence Evaluation; conversational reasoning
-// pipeline - question_type routing)
+// pipeline - question_type routing; structured-source routing)
 // One cheap, structured-JSON call decides whether a message is
 // (a) actually a question, (b) about an approved topic, (c) whether
-// it needs live P&W data, and (d) whether it's an alliance-specific
+// it needs live P&W data, (d) whether it's an alliance-specific
 // claim that must stay strictly grounded vs. a general Politics &
 // War / reasoning / math question where the model's own knowledge
-// is fair game. It also resolves pronouns/follow-ups against the
-// short conversation context it's given (which now includes UNAI's
-// own prior replies, not just human messages).
+// is fair game, and (e) whether it should route to a purpose-tagged
+// structured source (a Google Sheet like a Member Roster) rather
+// than a normal semantic document search — "list all members" needs
+// the whole roster, not a top-K similarity search, which has no
+// single chunk that's obviously "most relevant" to a request for
+// everything.
+// It also resolves pronouns/follow-ups against the short conversation
+// context it's given (which now includes UNAI's own prior replies,
+// not just human messages).
 // The real confidence score is re-evaluated after retrieval in
 // answerEngine.js, since confidence should reflect whether we
 // actually FOUND relevant information (for alliance-specific claims)
@@ -18,9 +24,15 @@
 // ============================================================
 const ai = require('../ai/providerManager');
 const configManager = require('../config/configManager');
+const sourceManager = require('../knowledge/sourceManager');
 
 async function classify(messageText, contextText = '') {
   const topics = configManager.enabledTopicNames().join(', ');
+
+  const structuredSources = sourceManager.listSheetPurposes();
+  const structuredSourceBlock = structuredSources.length
+    ? `Available structured data sources (purpose-tagged Google Sheets):\n${structuredSources.map(s => `- "${s.purpose}": ${s.title}`).join('\n')}\n\nIf the question is best answered by looking up MANY or ALL records from one of these — "list all members", "show the roster", "who is eligible for grants", "show the tax table" — rather than one specific fact, set structured_source to that exact purpose key (e.g. "member_roster"). Only set it when a listed source's purpose clearly matches the request; otherwise use null. When a structured source is matched, it's the authoritative answer for that intent — do NOT also request live_data for the same thing (e.g. don't request a live alliance-member-count lookup when the roster sheet already covers membership).`
+    : 'No structured data sources (purpose-tagged Google Sheets) are currently configured — always use null for structured_source.';
 
   const system = `You are a strict message classifier for a Politics & War alliance Discord assistant.
 
@@ -37,8 +49,10 @@ Classify question_type as one of:
 Also decide whether answering requires CURRENT, real-time Politics & War game data — e.g. a specific nation's current stats, a specific alliance's current ranking/members, or top alliance rankings right now. Do NOT set this for questions answerable from stored documentation or general game knowledge alone.
 If live data is needed, extract the exact nation or alliance name/leader name mentioned (entity_name) — the literal text as written, not a guess at spelling. If context resolves a pronoun to a previously-mentioned entity, use that resolved name.
 
+${structuredSourceBlock}
+
 Respond ONLY with JSON in this exact shape:
-{"is_question": boolean, "on_topic": boolean, "topic": string, "question_type": "alliance_specific"|"general_knowledge"|"mixed", "live_data": {"needed": boolean, "type": "nation"|"alliance"|"top_alliances"|null, "entity_name": string|null}, "reasoning": string}`;
+{"is_question": boolean, "on_topic": boolean, "topic": string, "question_type": "alliance_specific"|"general_knowledge"|"mixed", "live_data": {"needed": boolean, "type": "nation"|"alliance"|"top_alliances"|null, "entity_name": string|null}, "structured_source": string|null, "reasoning": string}`;
 
   const messages = [
     { role: 'system', content: system },
@@ -50,13 +64,19 @@ Respond ONLY with JSON in this exact shape:
     const parsed = JSON.parse(raw);
     if (!parsed.live_data) parsed.live_data = { needed: false, type: null, entity_name: null };
     if (!parsed.question_type) parsed.question_type = 'alliance_specific'; // safest default if the model omits it
+    if (parsed.structured_source === undefined) parsed.structured_source = null;
+    // If a structured source was matched, live_data for the same turn is
+    // redundant by design (see the prompt instruction above) — enforce it
+    // here too rather than only hoping the model complies.
+    if (parsed.structured_source) parsed.live_data = { needed: false, type: null, entity_name: null };
     return parsed;
   } catch {
     // Fail safe: if the classifier output isn't parseable, treat as not-a-question
     // rather than guessing (Section 3.3 - Silence is Better Than Being Wrong).
     return {
       is_question: false, on_topic: false, topic: '', question_type: 'alliance_specific',
-      live_data: { needed: false, type: null, entity_name: null }, reasoning: 'classifier parse failure'
+      live_data: { needed: false, type: null, entity_name: null }, structured_source: null,
+      reasoning: 'classifier parse failure'
     };
   }
 }
