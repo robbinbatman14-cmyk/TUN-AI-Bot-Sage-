@@ -63,7 +63,7 @@ async function addGoogleDocSource({ url, title, category, visibility, priority =
   return { sourceId: result.lastInsertRowid, documentId };
 }
 
-async function addGoogleSheetSource({ url, title, category, visibility, priority = 2, addedBy }) {
+async function addGoogleSheetSource({ url, title, category, visibility, priority = 2, purpose = null, addedBy }) {
   const sheetId = googleSheetsSource.extractGoogleSheetId(url);
   const raw = await fetchRaw({ type: 'google_sheet', external_id: sheetId });
   const content = await buildContent({ type: 'google_sheet' }, raw);
@@ -73,11 +73,47 @@ async function addGoogleSheetSource({ url, title, category, visibility, priority
   });
 
   const result = db.prepare(`
-    INSERT INTO knowledge_sources (type, source_url, external_id, document_id, content_hash, sync_enabled, added_by)
-    VALUES ('google_sheet', ?, ?, ?, ?, 1, ?)
-  `).run(url, sheetId, documentId, raw.rawHash, addedBy);
+    INSERT INTO knowledge_sources (type, source_url, external_id, document_id, content_hash, sheet_purpose, sync_enabled, added_by)
+    VALUES ('google_sheet', ?, ?, ?, ?, ?, 1, ?)
+  `).run(url, sheetId, documentId, raw.rawHash, purpose || null, addedBy);
 
   return { sourceId: result.lastInsertRowid, documentId, sheetNames: raw.sheetNames, rowCount: raw.rowCount };
+}
+
+function setSheetPurpose(sourceId, purpose) {
+  db.prepare('UPDATE knowledge_sources SET sheet_purpose = ? WHERE id = ?').run(purpose || null, sourceId);
+}
+
+/**
+ * Returns every approved sheet with a purpose set, for injection into the
+ * classifier's prompt ("here are the structured sources available"). If
+ * more than one sheet shares a purpose, only the most recently added is
+ * returned for that purpose — this assumes one primary sheet per purpose,
+ * which is the expected setup; link separate sheets under distinct
+ * purposes rather than duplicating one.
+ */
+function listSheetPurposes() {
+  const rows = db.prepare(`
+    SELECT ks.id as source_id, ks.sheet_purpose as purpose, ks.document_id, d.title
+    FROM knowledge_sources ks
+    JOIN documents d ON d.id = ks.document_id
+    WHERE ks.type = 'google_sheet' AND ks.sheet_purpose IS NOT NULL AND d.status = 'approved'
+    ORDER BY ks.id DESC
+  `).all();
+
+  const seen = new Set();
+  const deduped = [];
+  for (const row of rows) {
+    if (seen.has(row.purpose)) continue;
+    seen.add(row.purpose);
+    deduped.push(row);
+  }
+  return deduped;
+}
+
+function getDocumentIdForPurpose(purpose) {
+  const match = listSheetPurposes().find(p => p.purpose === purpose);
+  return match ? match.document_id : null;
 }
 
 function listSources() {
@@ -149,5 +185,6 @@ async function syncAllDueSources() {
 
 module.exports = {
   addGoogleDocSource, addGoogleSheetSource, listSources, getSource,
-  setSourceEnabled, removeSource, syncSource, syncAllDueSources
+  setSourceEnabled, removeSource, syncSource, syncAllDueSources,
+  setSheetPurpose, listSheetPurposes, getDocumentIdForPurpose
 };

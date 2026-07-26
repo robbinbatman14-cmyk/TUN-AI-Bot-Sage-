@@ -135,4 +135,26 @@ async function search(query, { level, topK = 6 } = {}) {
   return scored.map(({ embedding, rank, ...rest }) => rest); // don't leak raw vectors/internal rank upward
 }
 
-module.exports = { indexDocument, search, chunkText, queryEmbeddingCache, CHUNK_SEPARATOR };
+/**
+ * Returns EVERY chunk of one approved document, in original order, rather
+ * than a top-K semantic search. Used for structured-data requests ("list
+ * all members") where the answer needs completeness, not just the most
+ * semantically-similar handful of rows — a "list everything" query has no
+ * single chunk that's obviously "most relevant", so top-K search would
+ * effectively return a near-arbitrary subset and miss most of the data.
+ */
+function getAllChunksForDocument(documentId, level) {
+  const permissions = require('../permissions/permissionEngine');
+  const rows = db.prepare(`
+    SELECT chunks.content, documents.id as document_id, documents.title,
+           documents.category, documents.visibility, documents.version, documents.priority
+    FROM chunks
+    JOIN documents ON documents.id = chunks.document_id
+    WHERE documents.status = 'approved' AND documents.id = ?
+    ORDER BY chunks.chunk_index ASC
+  `).all(documentId);
+
+  return rows.filter(r => permissions.canAccessVisibility(level, r.visibility));
+}
+
+module.exports = { indexDocument, search, getAllChunksForDocument, chunkText, queryEmbeddingCache, CHUNK_SEPARATOR };
