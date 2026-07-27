@@ -62,27 +62,73 @@ async function getNationById(id) {
   return nation;
 }
 
+function titleCase(str) {
+  return str.replace(/\w\S*/g, w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase());
+}
+
 async function getNationByName(name) {
   const cacheKey = `nation:name:${name.toLowerCase()}`;
   const cached = cache.get(cacheKey);
   if (cached !== undefined) return cached;
 
-  let data = await client.query(
-    `query($name: [String]) { nations(nation_name: $name, first: 1) { data { ${NATION_FIELDS} } } }`,
-    { name: [name] }
-  );
-  let nation = data.nations?.data?.[0];
+  // P&W's nation_name/leader_name filters appear to match on exact string,
+  // so "odyssey" won't find "Odyssey" on its own. Rather than require
+  // members to remember exact capitalization, try a small set of likely
+  // variants — as typed, Title Case, all-lowercase, ALL-CAPS — stopping at
+  // the first hit. This isn't a true case-insensitive search (P&W doesn't
+  // expose one, and there's no feasible client-side index across the
+  // game's entire nation count the way there is for the much smaller
+  // alliance list), but it covers the realistic range of how someone
+  // might type a name from memory.
+  const variants = [...new Set([name, titleCase(name), name.toLowerCase(), name.toUpperCase()])];
 
-  if (!nation) {
-    data = await client.query(
-      `query($name: [String]) { nations(leader_name: $name, first: 1) { data { ${NATION_FIELDS} } } }`,
-      { name: [name] }
+  let nation = null;
+  for (const variant of variants) {
+    const data = await client.query(
+      `query($name: [String]) { nations(nation_name: $name, first: 1) { data { ${NATION_FIELDS} } } }`,
+      { name: [variant] }
     );
     nation = data.nations?.data?.[0];
+    if (nation) break;
+  }
+
+  if (!nation) {
+    for (const variant of variants) {
+      const data = await client.query(
+        `query($name: [String]) { nations(leader_name: $name, first: 1) { data { ${NATION_FIELDS} } } }`,
+        { name: [variant] }
+      );
+      nation = data.nations?.data?.[0];
+      if (nation) break;
+    }
   }
 
   cache.set(cacheKey, nation || null, 600);
   return nation || null;
+}
+
+/** Pulls a nation ID out of a pasted P&W profile link, e.g. politicsandwar.com/nation/id=12345. */
+function extractNationIdFromUrl(input) {
+  const match = (input || '').match(/nation\/id=(\d+)/i);
+  return match ? match[1] : null;
+}
+
+/**
+ * Resolves ANY of the three ways someone might identify a nation — a raw
+ * numeric ID, a pasted profile link, or a nation/leader name (case handled
+ * by getNationByName's variant retries above) — into a single nation
+ * lookup. This is the one function commands should call rather than each
+ * reimplementing "is this an ID, a link, or a name?" themselves.
+ * @param {string} input
+ */
+async function resolveNation(input) {
+  const trimmed = (input || '').trim();
+  if (/^\d+$/.test(trimmed)) return getNationById(trimmed);
+
+  const urlId = extractNationIdFromUrl(trimmed);
+  if (urlId) return getNationById(urlId);
+
+  return getNationByName(trimmed);
 }
 
 /**
@@ -170,4 +216,7 @@ async function getTopAlliances(limit = 10) {
   return sorted;
 }
 
-module.exports = { getNationById, getNationByName, getAllianceByName, getAllianceMembers, getTopAlliances, getAllianceIndex };
+module.exports = {
+  getNationById, getNationByName, resolveNation, extractNationIdFromUrl,
+  getAllianceByName, getAllianceMembers, getTopAlliances, getAllianceIndex
+};

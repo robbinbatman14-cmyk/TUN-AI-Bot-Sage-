@@ -27,10 +27,10 @@ const data = new SlashCommandBuilder()
       .addIntegerOption(o => o.setName('limit').setDescription('How many to show (default 10)').setRequired(false))))
   .addSubcommandGroup(g => g.setName('verify').setDescription('Link Discord users to their P&W nation')
     .addSubcommand(sc => sc.setName('link').setDescription('Link YOUR Discord account to your nation (verified via your nation\'s Discord Username field)')
-      .addIntegerOption(o => o.setName('nation_id').setDescription('Your nation ID').setRequired(true)))
+      .addStringOption(o => o.setName('nation').setDescription('Your nation name, ID, or profile link').setRequired(true)))
     .addSubcommand(sc => sc.setName('link-for').setDescription('[Admin] Link another member\'s Discord account to a nation, no verification check')
       .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(true))
-      .addIntegerOption(o => o.setName('nation_id').setDescription('Nation ID').setRequired(true)))
+      .addStringOption(o => o.setName('nation').setDescription('Nation name, ID, or profile link').setRequired(true)))
     .addSubcommand(sc => sc.setName('whois').setDescription('Look up the link between a Discord user and a nation')
       .addUserOption(o => o.setName('user').setDescription('Discord user').setRequired(false)))
     .addSubcommand(sc => sc.setName('unlink').setDescription('Unlink a Discord account (yourself, or [Admin] someone else)')
@@ -48,9 +48,7 @@ async function execute(interaction) {
     await interaction.deferReply();
     const query = interaction.options.getString('query');
     try {
-      const nation = /^\d+$/.test(query.trim())
-        ? await pnwQueries.getNationById(query.trim())
-        : await pnwQueries.getNationByName(query);
+      const nation = await pnwQueries.resolveNation(query);
       if (!nation) return interaction.editReply(`No nation found matching "${query}".`);
       const text = (await liveDataFetcher.fetchNationSummary(nation.nation_name)) || `No nation found matching "${query}".`;
       return interaction.editReply(text.replace('[Live Politics & War Data — Nation]\n', ''));
@@ -84,10 +82,10 @@ async function execute(interaction) {
   if (group === 'verify') {
     if (sub === 'link') {
       await interaction.deferReply({ ephemeral: true });
-      const nationId = interaction.options.getInteger('nation_id');
+      const nationInput = interaction.options.getString('nation');
       try {
-        const nation = await pnwQueries.getNationById(nationId);
-        if (!nation) return interaction.editReply(`No nation found with ID ${nationId}.`);
+        const nation = await pnwQueries.resolveNation(nationInput);
+        if (!nation) return interaction.editReply(`No nation found matching "${nationInput}". Double-check the spelling, or try your nation ID or profile link instead.`);
 
         const inGameDiscord = (nation.discord || '').toLowerCase().trim();
         const requester = interaction.user;
@@ -115,10 +113,10 @@ async function execute(interaction) {
       if (!permissionEngine.requireAdmin(interaction)) return;
       await interaction.deferReply({ ephemeral: true });
       const user = interaction.options.getUser('user');
-      const nationId = interaction.options.getInteger('nation_id');
+      const nationInput = interaction.options.getString('nation');
       try {
-        const nation = await pnwQueries.getNationById(nationId);
-        if (!nation) return interaction.editReply(`No nation found with ID ${nationId}.`);
+        const nation = await pnwQueries.resolveNation(nationInput);
+        if (!nation) return interaction.editReply(`No nation found matching "${nationInput}". Double-check the spelling, or try the nation ID or profile link instead.`);
         nationLink.linkNation({
           discordId: user.id, nationId: nation.id, nationName: nation.nation_name,
           leaderName: nation.leader_name, linkedBy: interaction.user.id, method: 'admin_override'
