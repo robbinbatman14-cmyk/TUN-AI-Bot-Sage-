@@ -21,7 +21,18 @@ function exportBackup() {
     topics: db.prepare('SELECT name, enabled FROM topics').all(),
     rolePermissions: db.prepare('SELECT role_id, level FROM role_permissions').all(),
     faq: db.prepare('SELECT question, answer, category, keywords, priority FROM faq').all(),
-    documents: db.prepare('SELECT title, category, visibility, priority, status, version, content FROM documents').all()
+documents: db.prepare('SELECT title, category, visibility, priority, status, version, content FROM documents').all(),
+nationLinks: db.prepare(`
+  SELECT
+    discord_id,
+    nation_id,
+    nation_name,
+    leader_name,
+    linked_by,
+    method,
+    linked_at
+  FROM nation_links
+`).all()
   };
 }
 
@@ -46,6 +57,34 @@ async function importBackup(backup) {
 
   const setRole = db.prepare('INSERT INTO role_permissions (role_id, level) VALUES (?, ?) ON CONFLICT(role_id) DO UPDATE SET level = excluded.level');
   for (const row of backup.rolePermissions || []) setRole.run(row.role_id, row.level);
+
+  // Restore verified Discord ↔ Nation links
+db.prepare('DELETE FROM nation_links').run();
+
+const addNationLink = db.prepare(`
+  INSERT INTO nation_links (
+    discord_id,
+    nation_id,
+    nation_name,
+    leader_name,
+    linked_by,
+    method,
+    linked_at
+  )
+  VALUES (?, ?, ?, ?, ?, ?, ?)
+`);
+
+for (const row of backup.nationLinks || []) {
+  addNationLink.run(
+    row.discord_id,
+    row.nation_id,
+    row.nation_name,
+    row.leader_name,
+    row.linked_by,
+    row.method,
+    row.linked_at
+  );
+}
 
   const addFaq = db.prepare('INSERT INTO faq (question, answer, category, keywords, priority) VALUES (?, ?, ?, ?, ?)');
   for (const row of backup.faq || []) addFaq.run(row.question, row.answer, row.category, row.keywords, row.priority || 0);
