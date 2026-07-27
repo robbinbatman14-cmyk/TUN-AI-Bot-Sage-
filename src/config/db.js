@@ -156,6 +156,13 @@ CREATE TABLE IF NOT EXISTS nation_links (
   method TEXT, -- self_verified | admin_override
   linked_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS sheet_data (
+  document_id INTEGER PRIMARY KEY,
+  data TEXT NOT NULL, -- JSON: [{name, headers: [...], rows: [[...], ...]}, ...] — one entry per tab
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY(document_id) REFERENCES documents(id) ON DELETE CASCADE
+);
 `);
 
 // --- Lightweight migrations for columns added after initial release ---
