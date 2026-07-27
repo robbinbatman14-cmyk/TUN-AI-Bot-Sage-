@@ -8,6 +8,12 @@
 // is just another version, with full history, using the same
 // machinery a manual /knowledge update would use.
 //
+// For Google Sheets specifically, a second representation is kept
+// alongside the prose/chunk text: a clean {headers, rows} structure
+// per tab, persisted in the sheet_data table, used by
+// sheetOperations.js for real sort/filter/count/average computation
+// rather than asking the model to eyeball a text dump.
+//
 // Change detection compares a hash of the SOURCE's raw bytes
 // (computed in googleDocsSource.js / googleSheetsSource.js), never
 // a hash of the final AI-processed text — see the comment in
@@ -46,6 +52,24 @@ async function buildContent(source, raw) {
   throw new Error(`Unknown source type "${source.type}".`);
 }
 
+function saveSheetData(documentId, structuredSheets) {
+  db.prepare(`
+    INSERT INTO sheet_data (document_id, data, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP)
+    ON CONFLICT(document_id) DO UPDATE SET data = excluded.data, updated_at = CURRENT_TIMESTAMP
+  `).run(documentId, JSON.stringify(structuredSheets));
+}
+
+/** Returns the persisted {headers, rows} structure for a document, or null if it's not a sheet (or not yet synced). */
+function getSheetData(documentId) {
+  const row = db.prepare('SELECT data FROM sheet_data WHERE document_id = ?').get(documentId);
+  if (!row) return null;
+  try {
+    return JSON.parse(row.data);
+  } catch {
+    return null;
+  }
+}
+
 async function addGoogleDocSource({ url, title, category, visibility, priority = 2, addedBy }) {
   const docId = googleDocsSource.extractGoogleDocId(url);
   const raw = await fetchRaw({ type: 'google_doc', external_id: docId });
@@ -71,6 +95,7 @@ async function addGoogleSheetSource({ url, title, category, visibility, priority
   const documentId = documentManager.addDocument({
     title, category, visibility, priority, content, filename: `google-sheet-${sheetId}.xlsx`, uploadedBy: addedBy
   });
+  saveSheetData(documentId, raw.structuredSheets);
 
   const result = db.prepare(`
     INSERT INTO knowledge_sources (type, source_url, external_id, document_id, content_hash, sheet_purpose, sync_enabled, added_by)
@@ -85,12 +110,13 @@ function setSheetPurpose(sourceId, purpose) {
 }
 
 /**
- * Returns every approved sheet with a purpose set, for injection into the
- * classifier's prompt ("here are the structured sources available"). If
- * more than one sheet shares a purpose, only the most recently added is
- * returned for that purpose — this assumes one primary sheet per purpose,
- * which is the expected setup; link separate sheets under distinct
- * purposes rather than duplicating one.
+ * Returns every approved sheet with a purpose set, including each tab's
+ * column headers, for injection into the classifier's prompt — it needs
+ * real column names to correctly map "revenue" or "population" in a
+ * question to the sheet's actual headers. If more than one sheet shares
+ * a purpose, only the most recently added is returned for that purpose —
+ * this assumes one primary sheet per purpose; link separate sheets under
+ * distinct purposes rather than duplicating one.
  */
 function listSheetPurposes() {
   const rows = db.prepare(`
@@ -106,7 +132,9 @@ function listSheetPurposes() {
   for (const row of rows) {
     if (seen.has(row.purpose)) continue;
     seen.add(row.purpose);
-    deduped.push(row);
+    const sheetData = getSheetData(row.document_id) || [];
+    const columns = [...new Set(sheetData.flatMap(s => s.headers))];
+    deduped.push({ ...row, columns });
   }
   return deduped;
 }
@@ -162,6 +190,7 @@ async function syncSource(id) {
 
   const content = await buildContent(source, raw);
   const updateResult = await documentManager.updateDocumentContent(source.document_id, content);
+  if (source.type === 'google_sheet') saveSheetData(source.document_id, raw.structuredSheets);
   db.prepare("UPDATE knowledge_sources SET content_hash = ?, last_synced_at = CURRENT_TIMESTAMP, last_sync_status = 'updated' WHERE id = ?")
     .run(raw.rawHash, id);
 
@@ -186,5 +215,5 @@ async function syncAllDueSources() {
 module.exports = {
   addGoogleDocSource, addGoogleSheetSource, listSources, getSource,
   setSourceEnabled, removeSource, syncSource, syncAllDueSources,
-  setSheetPurpose, listSheetPurposes, getDocumentIdForPurpose
+  setSheetPurpose, listSheetPurposes, getDocumentIdForPurpose, getSheetData
 };

@@ -53,13 +53,35 @@ function sheetToChunks(sheetName, rows) {
 }
 
 /**
+ * Extracts a clean {headers, rows} structure for one tab — the same data
+ * sheetToChunks() turns into prose, but preserved here for real spreadsheet
+ * OPERATIONS (sort/filter/count/average/rank). Text chunks are for
+ * semantic search and "list everything" dumps; this is for computation —
+ * asking an LLM to sort or count from a text dump is unreliable, and
+ * silently wrong once a sheet is large enough to get truncated. See
+ * sheetOperations.js.
+ */
+function sheetToStructuredData(sheetName, rows) {
+  if (rows.length === 0) return { name: sheetName, headers: [], rows: [] };
+  const headers = rows[0].map((h, i) => {
+    const label = (h ?? '').toString().trim();
+    return label || `Column ${i + 1}`;
+  });
+  const dataRows = rows.slice(1)
+    .filter(row => row.some(cell => (cell ?? '').toString().trim() !== ''))
+    .map(row => headers.map((_, i) => row[i] ?? ''));
+  return { name: sheetName, headers, rows: dataRows };
+}
+
+/**
  * Fetches a Google Sheet as .xlsx (all tabs), parses every sheet into
- * row-group chunks, and returns a hash of the RAW downloaded bytes for
- * change detection — same reasoning as googleDocsSource.js: never hash
- * anything derived, only the actual source bytes, so re-syncing an
- * unchanged sheet costs nothing.
+ * row-group chunks (for search/listing) AND a clean structured
+ * {headers, rows} form per tab (for operations), and returns a hash of
+ * the RAW downloaded bytes for change detection — same reasoning as
+ * googleDocsSource.js: never hash anything derived, only the actual
+ * source bytes, so re-syncing an unchanged sheet costs nothing.
  * @param {string} sheetId
- * @returns {Promise<{rawHash: string, content: string, sheetNames: string[], rowCount: number}>}
+ * @returns {Promise<{rawHash: string, content: string, sheetNames: string[], rowCount: number, structuredSheets: Array<{name: string, headers: string[], rows: any[][]}>}>}
  */
 async function fetchGoogleSheet(sheetId) {
   const crypto = require('crypto');
@@ -91,6 +113,7 @@ async function fetchGoogleSheet(sheetId) {
   }
 
   const allChunks = [];
+  const structuredSheets = [];
   let rowCount = 0;
   for (const sheetName of workbook.SheetNames) {
     const worksheet = workbook.Sheets[sheetName];
@@ -98,6 +121,7 @@ async function fetchGoogleSheet(sheetId) {
     const { chunks, rowCount: sheetRowCount } = sheetToChunks(sheetName, rows);
     allChunks.push(...chunks);
     rowCount += sheetRowCount;
+    structuredSheets.push(sheetToStructuredData(sheetName, rows));
   }
 
   if (allChunks.length === 0) {
@@ -109,7 +133,7 @@ async function fetchGoogleSheet(sheetId) {
   // instead of an arbitrary character count.
   const content = allChunks.join(knowledgeStore.CHUNK_SEPARATOR);
 
-  return { rawHash, content, sheetNames: workbook.SheetNames, rowCount };
+  return { rawHash, content, sheetNames: workbook.SheetNames, rowCount, structuredSheets };
 }
 
 module.exports = { extractGoogleSheetId, fetchGoogleSheet };
