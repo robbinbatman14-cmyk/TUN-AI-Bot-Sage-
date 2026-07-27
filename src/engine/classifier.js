@@ -1,18 +1,19 @@
 // ============================================================
 // Classifier (Sections 14, 15, 17 - Question Detection, Topic
 // Classification, Confidence Evaluation; conversational reasoning
-// pipeline - question_type routing; structured-source routing)
+// pipeline - question_type routing; structured-source routing;
+// structured-operation routing)
 // One cheap, structured-JSON call decides whether a message is
 // (a) actually a question, (b) about an approved topic, (c) whether
 // it needs live P&W data, (d) whether it's an alliance-specific
 // claim that must stay strictly grounded vs. a general Politics &
 // War / reasoning / math question where the model's own knowledge
-// is fair game, and (e) whether it should route to a purpose-tagged
-// structured source (a Google Sheet like a Member Roster) rather
-// than a normal semantic document search — "list all members" needs
-// the whole roster, not a top-K similarity search, which has no
-// single chunk that's obviously "most relevant" to a request for
-// everything.
+// is fair game, (e) whether it should route to a purpose-tagged
+// structured source (a Google Sheet like a Member Roster) instead of
+// a normal semantic document search, and (f) whether it's asking for
+// a spreadsheet OPERATION (sort/rank/filter/count/average) on that
+// source rather than just a listing — "top 10 by score" needs real
+// computation across every row, not the model eyeballing a text dump.
 // It also resolves pronouns/follow-ups against the short conversation
 // context it's given (which now includes UNAI's own prior replies,
 // not just human messages).
@@ -31,8 +32,10 @@ async function classify(messageText, contextText = '') {
 
   const structuredSources = sourceManager.listSheetPurposes();
   const structuredSourceBlock = structuredSources.length
-    ? `Available structured data sources (purpose-tagged Google Sheets):\n${structuredSources.map(s => `- "${s.purpose}": ${s.title}`).join('\n')}\n\nIf the question is best answered by looking up MANY or ALL records from one of these — "list all members", "show the roster", "who is eligible for grants", "show the tax table" — rather than one specific fact, set structured_source to that exact purpose key (e.g. "member_roster"). Only set it when a listed source's purpose clearly matches the request; otherwise use null. When a structured source is matched, it's the authoritative answer for that intent — do NOT also request live_data for the same thing (e.g. don't request a live alliance-member-count lookup when the roster sheet already covers membership).`
-    : 'No structured data sources (purpose-tagged Google Sheets) are currently configured — always use null for structured_source.';
+    ? `Available structured data sources (purpose-tagged Google Sheets):\n${structuredSources.map(s => `- "${s.purpose}": ${s.title} [columns: ${s.columns.join(', ')}]`).join('\n')}\n\n` +
+      `If the question is best answered by looking up records from one of these, set structured_source to that exact purpose key (e.g. "member_roster"). Only set it when a listed source's purpose clearly matches; otherwise use null. When a structured source is matched, it's authoritative for that intent — do NOT also request live_data for the same thing.\n\n` +
+      `Separately, decide if the request is a SPREADSHEET OPERATION rather than a plain listing — sorting, ranking/top-N, filtering, counting-with-a-condition, or averaging/summing a column. Examples: "rank nations by population", "top 10 by score", "which nation has the highest revenue", "count members with revenue above $50 million", "what is the average infrastructure". If so, fill in structured_operation using the EXACT column name from the source's [columns: ...] list above (map the natural-language term to the closest real column — e.g. "population" might map to a "Cities" or "Score" column depending on what actually exists; if nothing reasonably matches, leave structured_operation.needed false and let it fall back to a normal listing). A plain "list all members" or "show the roster" is NOT an operation — leave structured_operation.needed false for those, only structured_source matters.`
+    : 'No structured data sources (purpose-tagged Google Sheets) are currently configured — always use null for structured_source and false for structured_operation.needed.';
 
   const system = `You are a strict message classifier for a Politics & War alliance Discord assistant.
 
@@ -52,7 +55,7 @@ If live data is needed, extract the exact nation or alliance name/leader name me
 ${structuredSourceBlock}
 
 Respond ONLY with JSON in this exact shape:
-{"is_question": boolean, "on_topic": boolean, "topic": string, "question_type": "alliance_specific"|"general_knowledge"|"mixed", "live_data": {"needed": boolean, "type": "nation"|"alliance"|"top_alliances"|null, "entity_name": string|null}, "structured_source": string|null, "reasoning": string}`;
+{"is_question": boolean, "on_topic": boolean, "topic": string, "question_type": "alliance_specific"|"general_knowledge"|"mixed", "live_data": {"needed": boolean, "type": "nation"|"alliance"|"top_alliances"|null, "entity_name": string|null}, "structured_source": string|null, "structured_operation": {"needed": boolean, "type": "sort"|"top_n"|"bottom_n"|"count"|"filter"|"average"|"sum"|null, "column": string|null, "direction": "asc"|"desc"|null, "limit": number|null, "filter_column": string|null, "filter_operator": ">"|"<"|">="|"<="|"=="|"contains"|null, "filter_value": string|null}, "reasoning": string}`;
 
   const messages = [
     { role: 'system', content: system },
@@ -65,10 +68,17 @@ Respond ONLY with JSON in this exact shape:
     if (!parsed.live_data) parsed.live_data = { needed: false, type: null, entity_name: null };
     if (!parsed.question_type) parsed.question_type = 'alliance_specific'; // safest default if the model omits it
     if (parsed.structured_source === undefined) parsed.structured_source = null;
-    // If a structured source was matched, live_data for the same turn is
-    // redundant by design (see the prompt instruction above) — enforce it
-    // here too rather than only hoping the model complies.
+    if (!parsed.structured_operation) parsed.structured_operation = { needed: false };
+    // If a structured source (listing or operation) was matched, live_data
+    // for the same turn is redundant by design — enforce it here too
+    // rather than only hoping the model complies.
     if (parsed.structured_source) parsed.live_data = { needed: false, type: null, entity_name: null };
+    // An operation implies a source — if the model set one without the
+    // other, infer structured_source is needed too (fail toward still
+    // routing correctly rather than dropping the operation).
+    if (parsed.structured_operation.needed && !parsed.structured_source && structuredSources.length === 1) {
+      parsed.structured_source = structuredSources[0].purpose;
+    }
     return parsed;
   } catch {
     // Fail safe: if the classifier output isn't parseable, treat as not-a-question
@@ -76,7 +86,7 @@ Respond ONLY with JSON in this exact shape:
     return {
       is_question: false, on_topic: false, topic: '', question_type: 'alliance_specific',
       live_data: { needed: false, type: null, entity_name: null }, structured_source: null,
-      reasoning: 'classifier parse failure'
+      structured_operation: { needed: false }, reasoning: 'classifier parse failure'
     };
   }
 }
