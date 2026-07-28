@@ -26,7 +26,7 @@ async function execute(interaction) {
     const buffer = Buffer.from(json, 'utf-8');
     const attachment = new AttachmentBuilder(buffer, { name: `unai-backup-${Date.now()}.json` });
     return interaction.editReply({
-      content: `Backup exported: ${backup.documents.length} document(s), ${backup.faq.length} FAQ entr${backup.faq.length === 1 ? 'y' : 'ies'}, full configuration. Store this somewhere safe — it contains your full knowledge base content.`,
+      content: `Backup exported: ${backup.documents.length} document(s), ${backup.faq.length} FAQ entr${backup.faq.length === 1 ? 'y' : 'ies'}, ${backup.nationLinks.length} verified nation link(s), ${backup.knowledgeSources.length} knowledge source(s), full configuration. Store this somewhere safe — it contains your full knowledge base content.`,
       files: [attachment]
     });
   }
@@ -55,6 +55,11 @@ async function execute(interaction) {
         text += `\n\nThe documents themselves are restored and safe — they just won't show up in search until re-indexed. Once the underlying issue above is resolved, run \`/knowledge reindex id:X\` for each (see \`/knowledge list\` for their IDs).`;
       } else {
         text += '.';
+      }
+      text += `\n${result.nationLinksRestored} verified nation link(s) restored.`;
+      text += `\n${result.sourcesRestored} knowledge source(s) restored (Google Docs/Sheets sync links), ${result.sheetDataRestored} with structured spreadsheet data.`;
+      if (result.sourcesSkipped > 0) {
+        text += ` ${result.sourcesSkipped} source(s) from this backup couldn't be re-attached — likely an older backup made before sources were included in exports (nothing was lost, just nothing to link them to; re-add with \`/sources add-google-doc\`/\`add-google-sheet\` if needed).`;
       }
       return interaction.editReply(text.slice(0, 1900));
     } catch (err) {
