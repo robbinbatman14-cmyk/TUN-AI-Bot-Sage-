@@ -207,6 +207,7 @@ Beyond the system prompt already instructing the model to resist override attemp
 
 `/ai costs` shows real token counts and a rough cost estimate pulled from actual API responses (not a guess) over a configurable look-back window, e.g. `/ai costs hours:168` for the last week. The dollar figure is clearly an estimate based on published rates, not your actual bill — Gemini's free tier is genuinely $0 unless you've enabled billing, regardless of what the estimate shows.
 
+
 ### Google Docs knowledge sync
 
 Instead of exporting and re-uploading a document every time it changes, you can link a Google Doc directly. Edit the Doc, and UNAI picks up the change automatically — no re-uploading, ever.
