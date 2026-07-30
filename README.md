@@ -9,7 +9,7 @@ A Discord assistant for your Politics & War alliance. Built around:
 - **Provider-agnostic AI** — runs on Google Gemini's free tier by default; switch to OpenAI or Anthropic with one command, no code changes.
 - **Fully configurable from Discord** — no code editing after setup.
 
-Integrations with your future Banking/Audit/Legislation bots are intentionally **not** built yet (they don't exist to connect to) — but the architecture (`src/ai`, `src/knowledge`, `src/engine`, `src/permissions`) is modular so they can be added later as new files without rewriting what's here.
+Integrations with your future Banking/Audit/Legislation bots are intentionally **not** built yet (they don't exist to connect to) — but the architecture (`src/ai`, `src/knowledge`, `src/engine`, `src/permissions`) is modular so they can be added later as new files without rewriting what's here
 
 ---
 
