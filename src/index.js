@@ -44,21 +44,35 @@ client.once(Events.ClientReady, c => {
   // A lockdown check happens inside each run rather than skipping the
   // scheduler entirely, so sync resumes automatically the moment lockdown
   // is lifted without needing a restart.
-  const intervalMinutes = configManager.getNumber('google_doc_sync_interval_minutes') || 60;
-  const runSync = async () => {
+const autoSyncEnabled =
+    process.env.AUTO_SOURCE_SYNC !== 'false';
+
+const intervalMinutes =
+    configManager.getNumber('google_doc_sync_interval_minutes') || 60;
+
+const runSync = async () => {
     if (configManager.getBool('lockdown_enabled')) return;
+
     try {
-      const results = await sourceManager.syncAllDueSources();
-      const changed = results.filter(r => r.synced);
-      if (changed.length > 0) {
-        console.log(`[UNAI] Knowledge source sync: ${changed.length} source(s) updated.`);
-      }
+        const results = await sourceManager.syncAllDueSources();
+        const changed = results.filter(r => r.synced);
+
+        if (changed.length > 0) {
+            console.log(`[UNAI] Knowledge source sync: ${changed.length} source(s) updated.`);
+        } else {
+            console.log('[UNAI] Knowledge source sync: no changes.');
+        }
     } catch (err) {
-      console.error('[UNAI] Knowledge source sync failed:', err.message);
+        console.error('[UNAI] Knowledge source sync failed:', err.message);
     }
-  };
-  setTimeout(runSync, 2 * 60 * 1000); // first run 2 minutes after startup
-  setInterval(runSync, intervalMinutes * 60 * 1000);
+};
+
+if (autoSyncEnabled) {
+    setTimeout(runSync, 2 * 60 * 1000);
+    setInterval(runSync, intervalMinutes * 60 * 1000);
+} else {
+    console.log('[UNAI] Automatic knowledge sync is disabled.');
+}
 });
 
 client.on(Events.InteractionCreate, async interaction => {

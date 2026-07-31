@@ -144,6 +144,17 @@ async function processMultipleQuestions(message, questions, level, contextText) 
 async function process(message, { wasMentioned, guildMember }) {
   const startTime = Date.now();
 
+  // Stage: hard channel/category block. Deliberately the FIRST check,
+  // before anything else runs — unlike the channel allowlist further
+  // down, this is never bypassed by an @mention or an active
+  // conversation. It exists specifically so alliance-internal info can
+  // never surface in a public-facing channel/category even if a member
+  // tags the bot there by mistake. Context isn't even recorded for a
+  // blocked channel, since it could never be used for anything.
+  if (configManager.isChannelBlocked(message.channel.id, message.channel.parentId)) {
+    return { action: 'silent', reason: 'channel_blocked' };
+  }
+
   // Stage: always record context, even for messages we won't answer,
   // so later questions have something to refer back to.
   pushContext(message.channel.id, message.author.username, message.content);

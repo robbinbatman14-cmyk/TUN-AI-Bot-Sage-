@@ -69,6 +69,27 @@ function isChannelAllowed(channelId) {
   return !!db.prepare('SELECT 1 FROM channels WHERE channel_id = ?').get(channelId);
 }
 
+// --- Blocked channels/categories (hard block, Section 12/13 extension) ---
+// Unlike the allowlist above, this is NEVER bypassed by an @mention —
+// it exists specifically so an admin can guarantee alliance-internal
+// info never surfaces in a public-facing channel or category, even if a
+// member tags the bot there by mistake or on purpose.
+function addBlockedChannel(id, type, guildId, addedBy) {
+  db.prepare('INSERT OR REPLACE INTO blocked_channels (id, type, guild_id, added_by) VALUES (?, ?, ?, ?)').run(id, type, guildId, addedBy);
+}
+function removeBlockedChannel(id) {
+  db.prepare('DELETE FROM blocked_channels WHERE id = ?').run(id);
+}
+function listBlockedChannels() {
+  return db.prepare('SELECT id, type, added_by, created_at FROM blocked_channels').all();
+}
+/** True if the channel itself, or its parent category, is on the blacklist. */
+function isChannelBlocked(channelId, parentId) {
+  if (db.prepare('SELECT 1 FROM blocked_channels WHERE id = ?').get(channelId)) return true;
+  if (parentId && db.prepare('SELECT 1 FROM blocked_channels WHERE id = ?').get(parentId)) return true;
+  return false;
+}
+
 // --- Topics ---
 const DEFAULT_TOPICS = [
   'politics_and_war', 'military', 'economy', 'wars', 'trading', 'cities',
@@ -95,5 +116,6 @@ function enabledTopicNames() {
 module.exports = {
   get, getBool, getNumber, set,
   addChannel, removeChannel, listChannels, isChannelAllowed,
+  addBlockedChannel, removeBlockedChannel, listBlockedChannels, isChannelBlocked,
   setTopicEnabled, listTopics, enabledTopicNames
 };

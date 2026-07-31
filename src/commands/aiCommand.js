@@ -47,6 +47,14 @@ const data = new SlashCommandBuilder()
     .addSubcommand(sc => sc.setName('remove').setDescription('Stop UNAI from responding in a channel')
       .addChannelOption(o => o.setName('channel').setDescription('Channel').setRequired(true).addChannelTypes(ChannelType.GuildText)))
     .addSubcommand(sc => sc.setName('list').setDescription('List monitored channels')))
+  .addSubcommandGroup(g => g.setName('blacklist').setDescription('Hard-block channels/categories UNAI must never respond in, even if tagged')
+    .addSubcommand(sc => sc.setName('add').setDescription('Block a channel or an entire category — cannot be bypassed by @mentioning the bot')
+      .addChannelOption(o => o.setName('target').setDescription('Channel or category to block').setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildCategory)))
+    .addSubcommand(sc => sc.setName('remove').setDescription('Unblock a previously blacklisted channel or category')
+      .addChannelOption(o => o.setName('target').setDescription('Channel or category to unblock').setRequired(true)
+        .addChannelTypes(ChannelType.GuildText, ChannelType.GuildCategory)))
+    .addSubcommand(sc => sc.setName('list').setDescription('List blocked channels/categories')))
   .addSubcommandGroup(g => g.setName('topics').setDescription('Manage approved discussion topics')
     .addSubcommand(sc => sc.setName('enable').setDescription('Enable a topic')
       .addStringOption(o => o.setName('name').setDescription('Topic name').setRequired(true)))
@@ -101,6 +109,37 @@ async function execute(interaction) {
       const ids = configManager.listChannels();
       const text = ids.length ? ids.map(id => `<#${id}>`).join(', ') : '*No channels configured yet.*';
       return interaction.reply({ content: `**Monitored channels:** ${text}`, ephemeral: true });
+    }
+  }
+
+  if (group === 'blacklist') {
+    if (sub === 'add') {
+      const target = interaction.options.getChannel('target');
+      const type = target.type === ChannelType.GuildCategory ? 'category' : 'channel';
+      configManager.addBlockedChannel(target.id, type, interaction.guildId, interaction.user.id);
+      return interaction.reply({
+        content: type === 'category'
+          ? `🚫 Blocked the **${target.name}** category — UNAI will never respond in any channel under it, even if tagged.`
+          : `🚫 Blocked ${target} — UNAI will never respond there, even if tagged.`,
+        ephemeral: true
+      });
+    }
+    if (sub === 'remove') {
+      const target = interaction.options.getChannel('target');
+      configManager.removeBlockedChannel(target.id);
+      return interaction.reply({ content: `Unblocked ${target.type === ChannelType.GuildCategory ? `the **${target.name}** category` : target}.`, ephemeral: true });
+    }
+    if (sub === 'list') {
+      const blocked = configManager.listBlockedChannels();
+      if (blocked.length === 0) return interaction.reply({ content: '*Nothing blacklisted.*', ephemeral: true });
+      const text = blocked.map(b => {
+        if (b.type === 'category') {
+          const cat = interaction.guild.channels.cache.get(b.id);
+          return cat ? `Category **${cat.name}**` : `Category ID \`${b.id}\` (not found — may have been deleted)`;
+        }
+        return `<#${b.id}>`;
+      }).join('\n');
+      return interaction.reply({ content: `**Blocked (even when tagged):**\n${text}`, ephemeral: true });
     }
   }
 

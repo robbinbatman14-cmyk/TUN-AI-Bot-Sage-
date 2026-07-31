@@ -28,6 +28,14 @@ CREATE TABLE IF NOT EXISTS channels (
   guild_id TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS blocked_channels (
+  id TEXT PRIMARY KEY, -- a channel ID or a category ID, per "type"
+  type TEXT NOT NULL,  -- 'channel' | 'category'
+  guild_id TEXT NOT NULL,
+  added_by TEXT,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS topics (
   name TEXT PRIMARY KEY,
   enabled INTEGER NOT NULL DEFAULT 1

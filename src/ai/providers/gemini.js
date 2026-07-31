@@ -36,20 +36,41 @@ function extractRetryDelaySeconds(err) {
 }
 
 /**
+ * Google's 429 errors cover two very different situations, and treating
+ * them the same is actively misleading: a per-minute/burst limit clears
+ * within seconds and a short retry genuinely helps; a per-day (RPD) limit
+ * won't clear until midnight Pacific Time no matter how long you wait
+ * this session — retrying it just wastes time and adds pointless delay
+ * before showing the real problem. Google's error always names the quota
+ * ("...PerDay..." vs "...PerMinute...") so this is detected directly from
+ * the message rather than guessed.
+ */
+function classifyQuotaError(err) {
+  const msg = err?.message || '';
+  if (/PerDay/i.test(msg)) return 'daily';
+  if (/PerMinute/i.test(msg)) return 'per_minute';
+  return 'unknown';
+}
+
+/**
  * Generic retry-with-backoff wrapper for any Gemini SDK call, used for
- * both chat (generateContent) and embeddings (embedContent) — a real gap
- * fixed here: embeddings previously had NO retry logic at all, even
- * though 429s here are exactly as transient/recoverable as chat 429s,
- * and Google's own error message tells us exactly how long to wait.
+ * both chat (generateContent) and embeddings (embedContent). Skips
+ * retrying entirely for a daily-quota 429 (see classifyQuotaError) since
+ * no amount of waiting within a retry loop fixes that — it fails fast
+ * instead, so the caller's error message shows up immediately rather
+ * than after ~100s of pointless retries.
  * @param {() => Promise<any>} fn
  */
 async function withRetry(fn, attempt = 1) {
   try {
     return await fn();
   } catch (err) {
+    if (err?.status === 429 && classifyQuotaError(err) === 'daily') {
+      throw err; // fail fast — retrying cannot help a daily cap
+    }
     if (err?.status === 429 && attempt < 3) {
       const waitSeconds = extractRetryDelaySeconds(err);
-      console.warn(`[Gemini] Rate limited, retrying in ${waitSeconds}s (attempt ${attempt}/2)...`);
+      console.warn(`[Gemini] Rate limited (per-minute), retrying in ${waitSeconds}s (attempt ${attempt}/2)...`);
       await new Promise(r => setTimeout(r, waitSeconds * 1000));
       return withRetry(fn, attempt + 1);
     }
@@ -86,10 +107,18 @@ async function chat(messages, opts = {}) {
       );
     }
     if (err?.status === 429) {
+      if (classifyQuotaError(err) === 'daily') {
+        throw new Error(
+          `Gemini's free-tier DAILY quota is used up for this model (${err.message}). ` +
+          `This resets at midnight Pacific Time — it's not a short-lived limit, so retrying now (or in a minute) won't help no matter how many times you try today. ` +
+          `Options: wait for the reset, enable billing on the same Google AI Studio project for much higher limits, ` +
+          `or run "/ai provider openai" (or anthropic) to switch providers if you have another key configured.`
+        );
+      }
       throw new Error(
         `Gemini free-tier quota exceeded even after retrying (${err.message}). ` +
-        `Either wait for the daily quota to reset, enable billing on the same Google AI Studio project for higher limits, ` +
-        `or run "/ai provider openai" (or anthropic) to switch providers if you have another key configured.`
+        `This looks like a short-lived per-minute limit, not the daily cap — waiting a bit and trying again should work. ` +
+        `If it keeps happening, enable billing on the same Google AI Studio project for higher limits.`
       );
     }
     throw err;
@@ -142,9 +171,17 @@ async function embedBatch(texts) {
       response = await withRetry(() => client.models.embedContent({ model: EMBED_MODEL, contents: batch }));
     } catch (err) {
       if (err?.status === 429) {
+        if (classifyQuotaError(err) === 'daily') {
+          throw new Error(
+            `Gemini's free-tier DAILY embedding quota is used up (${err.message}). ` +
+            `This resets at midnight Pacific Time — retrying now, or in a minute, or even later today won't help; it's not a short-lived limit. ` +
+            `Options: wait for the reset, enable billing on the same Google AI Studio project for much higher limits, ` +
+            `or run "/ai provider openai" if you have an OpenAI key configured, which uses a separate embedding quota entirely.`
+          );
+        }
         throw new Error(
           `Gemini embedding quota exceeded even after retrying (${err.message}). ` +
-          `This is usually the per-minute embedding quota, which resets quickly — waiting a minute and retrying (e.g. /knowledge reindex) often just works. ` +
+          `This looks like a short-lived per-minute limit, not the daily cap — waiting a bit and retrying (e.g. /knowledge reindex) should work. ` +
           `If it keeps happening, enable billing on the same Google AI Studio project for higher limits.`
         );
       }
